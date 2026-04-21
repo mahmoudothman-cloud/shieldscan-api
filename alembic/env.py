@@ -13,7 +13,9 @@ from alembic import context
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from app.config import settings  # noqa: E402
+from app.models import base as _models_base  # noqa: F401, E402  (ensure all model modules register tables with Base.metadata)
 from app.models.base import Base  # noqa: E402
+import app.models  # noqa: F401, E402  (triggers app/models/__init__.py to import every model module)
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
