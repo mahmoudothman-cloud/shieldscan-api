@@ -10,6 +10,7 @@ from app.models.identity import (
     Organization,
     User,
 )
+from tests.conftest import use_org
 
 
 # --- Structural tests: addendum columns on Organization ------------------
@@ -125,6 +126,7 @@ async def test_api_key_belongs_to_org(db_session: AsyncSession) -> None:
     org = Organization(name="KeyCo", slug="keyco")
     db_session.add(org)
     await db_session.flush()
+    await use_org(db_session, org.id)
 
     key = APIKey(
         organization_id=org.id,

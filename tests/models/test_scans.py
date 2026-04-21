@@ -10,6 +10,7 @@ from app.models.mobile import MobilePlatform, MobileUpload
 from app.models.projects import Project, ProjectCredential
 from app.models.recon import AttackSurface, SubdomainStatus
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
+from tests.conftest import use_org
 
 
 # ─── Structural tests: ScanType enum (audit D) ──────────────────────────
@@ -97,6 +98,9 @@ async def _make_org(db: AsyncSession, slug: str = "acme") -> Organization:
     org = Organization(name="Acme", slug=slug)
     db.add(org)
     await db.flush()
+    # Every test that writes to tenant-scoped tables must set the RLS
+    # tenant context. Doing it in the helper means every caller gets it.
+    await use_org(db, org.id)
     return org
 
 

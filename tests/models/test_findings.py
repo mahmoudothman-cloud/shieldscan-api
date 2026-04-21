@@ -18,6 +18,7 @@ from app.models.vulnerabilities import (
     VulnerabilityHistory,
     VulnerabilityStatus,
 )
+from tests.conftest import use_org
 
 
 # ─── Structural: enums ──────────────────────────────────────────────────
@@ -130,6 +131,7 @@ async def _setup_scan(db: AsyncSession) -> tuple[Organization, Scan]:
     org = Organization(name="Acme", slug="acme")
     db.add(org)
     await db.flush()
+    await use_org(db, org.id)
 
     project = Project(
         organization_id=org.id,
@@ -397,6 +399,7 @@ async def test_audit_log_is_append_only_shape(db_session: AsyncSession) -> None:
     user = User(email="a@logco.test", hashed_password="x", full_name="A")
     db_session.add_all([org, user])
     await db_session.flush()
+    await use_org(db_session, org.id)
 
     log = AuditLog(
         organization_id=org.id,

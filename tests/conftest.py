@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from uuid import UUID
 
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Point Settings at the isolated test database BEFORE app.config is imported
@@ -42,17 +44,56 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     # test — otherwise asyncpg raises "attached to a different loop". The
     # schema is small (handful of tables); create_all/drop_all per test is
     # cheap and avoids cross-test state leakage.
+    from app.db.policies import (
+        APP_ROLE_NAME,
+        app_role_upgrade_sql,
+        audit_triggers_upgrade_sql,
+        rls_upgrade_sql,
+    )
+
     engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)
     async with engine.begin() as conn:
+        # drop_all cascades to drop each table's triggers + policies, so
+        # no explicit trigger/policy DROP is needed here.
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+        for sql in rls_upgrade_sql():
+            await conn.execute(text(sql))
+        for sql in audit_triggers_upgrade_sql():
+            await conn.execute(text(sql))
+        for sql in app_role_upgrade_sql():
+            await conn.execute(text(sql))
 
-    session_factory = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
-    async with session_factory() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+    # Bind the AsyncSession to a single persistent connection (not the
+    # engine directly). Two reasons:
+    #   1. A session-level `SET app.current_org_id` must survive commits,
+    #      which only happens if the session holds the same connection
+    #      across transactions.
+    #   2. We `SET ROLE shieldscan_app` on this connection so RLS actually
+    #      applies. The owner role (`shieldscan`, POSTGRES_USER) is a
+    #      superuser and therefore bypasses RLS unconditionally — FORCE RLS
+    #      does NOT override that. Running as a non-superuser role is the
+    #      only way to make policies apply in tests.
+    connection = await engine.connect()
+    await connection.execute(text(f"SET ROLE {APP_ROLE_NAME};"))
+    session = AsyncSession(bind=connection, expire_on_commit=False)
+    try:
+        yield session
+    finally:
+        await session.close()
+        await connection.close()
     await engine.dispose()
+
+
+async def use_org(session: AsyncSession, org_id: UUID | str) -> None:
+    """Set the session-local tenant for RLS checks.
+
+    Every test that writes to a tenant-scoped table MUST call this after
+    creating (and flushing) its Organization — otherwise RLS's
+    `WITH CHECK (organization_id = current_setting('app.current_org_id'))`
+    rejects the insert.
+    """
+    # Use SET (session-level), not SET LOCAL, so it survives test-level
+    # session.commit() calls. Each test gets a fresh connection+engine, so
+    # no cross-test leakage.
+    await session.execute(text(f"SET app.current_org_id = '{org_id}'"))
