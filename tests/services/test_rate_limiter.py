@@ -141,6 +141,56 @@ async def test_window_key_has_ttl_set(limiter, redis_client):
 
 
 @pytest.mark.asyncio
+async def test_boundary_burst_is_accepted_2x_limit(
+    redis_client, monkeypatch
+):
+    """Fixed-window semantics: a request at T-epsilon lands in window N
+    and a request at T+epsilon lands in window N+1. An attacker timing
+    across the boundary can get up to 2x the limit in the minimum
+    inter-request interval.
+
+    This is NOT a bug — it is the documented trade-off of fixed window
+    vs sliding-window-log (see rate_limiter.py module docstring and
+    the Task 2.3 scope proposal). This test pins the behavior so a
+    future refactor that *tightens* the algorithm (intentionally or
+    otherwise) must be an explicit design choice, not an accident.
+    """
+    from app.services import rate_limiter as rl_module
+
+    t = {"now": 1_000_000_000.000}  # arbitrary epoch, well inside a minute
+
+    def fake_time():
+        return t["now"]
+
+    monkeypatch.setattr(rl_module.time, "time", fake_time)
+    limiter = rl_module.RateLimiter(redis_client)
+
+    # Fill window N to the cap (limit=5, 60s window).
+    for _ in range(5):
+        r = await limiter.check("login_ip", "attacker", limit=5, window_seconds=60)
+        assert r.allowed is True
+    # Still inside window N — 6th request denied.
+    r = await limiter.check("login_ip", "attacker", limit=5, window_seconds=60)
+    assert r.allowed is False
+
+    # Jump across the boundary. 1_000_000_000 // 60 * 60 = 999_999_960
+    # (window N starts at -40s). New window N+1 begins at 1_000_000_020.
+    t["now"] = 1_000_000_020.001
+
+    # All five requests in window N+1 must succeed — proving the 2x burst.
+    for _ in range(5):
+        r = await limiter.check("login_ip", "attacker", limit=5, window_seconds=60)
+        assert r.allowed is True
+    # Sixth in N+1 denied.
+    r = await limiter.check("login_ip", "attacker", limit=5, window_seconds=60)
+    assert r.allowed is False
+
+    # Confirm two distinct keys now exist for this (scope, identifier).
+    keys = [k async for k in redis_client.scan_iter(match="ratelimit:login_ip:attacker:*")]
+    assert len(keys) == 2
+
+
+@pytest.mark.asyncio
 async def test_ttl_set_once_not_extended_on_each_hit(limiter, redis_client):
     """The TTL belongs to the window, not to the latest request —
     otherwise a steady request stream never expires and a burst at
