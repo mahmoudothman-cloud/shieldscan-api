@@ -8,7 +8,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # PG18+ expects the mount at /var/lib/postgresql (parent); data lives in ./18/docker/ inside.
+      - pgdata:/var/lib/postgresql
 
   redis:
     image: redis:8.6.2
