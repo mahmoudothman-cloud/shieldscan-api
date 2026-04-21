@@ -5,4 +5,11 @@ register when their modules are imported. Keep this list in sync with new
 model files under src/app/models/.
 """
 
-from app.models import base, identity  # noqa: F401
+from app.models import (  # noqa: F401
+    base,
+    identity,
+    mobile,
+    projects,
+    recon,
+    scans,
+)
