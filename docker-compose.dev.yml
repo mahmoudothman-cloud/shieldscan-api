@@ -8,7 +8,10 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # PG18+ expects the mount at /var/lib/postgresql (parent); data lives in ./18/docker/ inside.
+      # Mount the PARENT dir, not /var/lib/postgresql/data.
+      # PG18's official image stores data under /var/lib/postgresql/18/docker/ so
+      # pg_upgrade --link can run across majors without crossing a mount boundary.
+      # Mounting at /var/lib/postgresql/data triggers a startup refusal on PG18+.
       - pgdata:/var/lib/postgresql
 
   redis:
