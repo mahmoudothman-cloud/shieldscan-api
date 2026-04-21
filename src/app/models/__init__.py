@@ -6,10 +6,13 @@ model files under src/app/models/.
 """
 
 from app.models import (  # noqa: F401
+    audit,
     base,
     identity,
     mobile,
     projects,
+    raw_findings,
     recon,
     scans,
+    vulnerabilities,
 )
