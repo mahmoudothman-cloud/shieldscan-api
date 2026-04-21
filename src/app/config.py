@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
-    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     FERNET_KEY: str
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "https://app.shieldscan.io"]
     ENVIRONMENT: str = "development"
