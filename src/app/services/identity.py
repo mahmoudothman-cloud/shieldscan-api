@@ -152,6 +152,25 @@ async def register_identity(
         EmailAlreadyRegistered:     on unique-email violation.
         SlugGenerationFailed:       5 consecutive slug collisions.
         ValueError:                 password exceeds bcrypt's 72-byte limit.
+
+    Transaction ownership contract
+    ------------------------------
+
+    - **Fresh session (no active tx):** ``register_identity`` owns the
+      transaction. Commits on success, rolls back on failure. The
+      caller MUST NOT call ``commit()``.
+
+    - **Session with an active tx:** ``register_identity`` opens a
+      SAVEPOINT (via ``_owning_tx`` → ``db.begin_nested()``). Commits
+      the savepoint on success, rolls back the savepoint on failure.
+      The **outer** transaction's commit is the **caller's**
+      responsibility. If the caller forgets to commit, this function
+      appears to succeed but never persists anything.
+
+    In practice: the normal caller is a FastAPI endpoint body, and
+    FastAPI's dependency chain commits on request completion. Only
+    background jobs / CLI tools that manage their own transactions
+    need to commit explicitly.
     """
     # ADR-010 consequence: enforce 72-byte password limit at the
     # service boundary. HTTP endpoint also validates for a cleaner 400.
