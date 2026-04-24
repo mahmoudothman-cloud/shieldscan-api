@@ -49,7 +49,7 @@ from app.services.auth import (
     decode_token,
 )
 from app.services.rate_limiter import RateLimiter
-from app.services.token_revocation import is_revoked
+from app.services.token_revocation import get_user_revoked_before, is_revoked
 
 logger = logging.getLogger(__name__)
 
@@ -445,6 +445,36 @@ async def get_auth_identity(
     sub = payload.get("sub")
     if not sub:
         raise _UNAUTHORIZED
+
+    # User-level revocation (Task 2.X, ADR-011 deferred section shipped).
+    # Compare the token's `iat` claim against `user_revoked_before:{sub}`
+    # so password-change / admin-force-logout invalidate EVERY token
+    # issued before that moment, without needing to enumerate jtis.
+    #
+    # Short-circuit (Option C): get_user_revoked_before returns None for
+    # users who have never had a user-level revocation. That's the vast
+    # majority of requests — one Redis GET on a missing key, O(1), done.
+    iat = payload.get("iat")
+    if iat is None:
+        # Defensive: every token minted post-commit 4d32fcc carries iat.
+        # A missing iat means either a pre-4d32fcc test/dev token (which
+        # expires in 15 min anyway) or a token forged by an actor who
+        # somehow signed it without the standard factory. Log LOUDLY so
+        # production monitoring alerts — this should never fire in prod.
+        logger.error(
+            "Token missing iat claim for sub=%s; user-level revocation "
+            "bypassed. Should not occur post-commit 4d32fcc.",
+            sub,
+        )
+    else:
+        try:
+            revoked_before = await get_user_revoked_before(redis, sub)
+        except Exception as e:
+            logger.error("redis user_revoked_before check failed: %s", e)
+            raise _UNAUTHORIZED from e
+        if revoked_before is not None and iat < revoked_before:
+            raise _UNAUTHORIZED  # token invalidated by user-level revocation
+
     try:
         user_id = UUID(sub)
     except (ValueError, TypeError):

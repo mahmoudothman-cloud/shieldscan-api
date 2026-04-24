@@ -90,7 +90,11 @@ from app.services.identity import (
     register_identity,
 )
 from app.services.rate_limiter import RateLimiter
-from app.services.token_revocation import is_revoked, revoke
+from app.services.token_revocation import (
+    get_user_revoked_before,
+    is_revoked,
+    revoke,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +339,28 @@ async def refresh(
                 )
                 await db.commit()
         raise _UNAUTH
+
+    # 3b. User-level revocation check (Task 2.X gap fix — ADR-011).
+    # Without this, a pre-password-change refresh token whose jti
+    # isn't in the targeted revocation list would still be accepted
+    # here and mint a fresh post-change pair. See DRIFT-LOG 2026-04-23.
+    iat = payload.get("iat")
+    if iat is None:
+        logger.error(
+            "Refresh token missing iat claim for sub=%s; user-level "
+            "revocation bypassed. Should not occur post-commit 4d32fcc.",
+            sub,
+        )
+    else:
+        try:
+            revoked_before = await get_user_revoked_before(redis, sub)
+        except Exception as e:
+            logger.error(
+                "redis user_revoked_before check failed on /refresh: %s", e
+            )
+            raise _UNAUTH from e
+        if revoked_before is not None and iat < revoked_before:
+            raise _UNAUTH  # token invalidated by password change
 
     # 4. fetch user (handles admin-deleted-but-token-alive)
     try:
