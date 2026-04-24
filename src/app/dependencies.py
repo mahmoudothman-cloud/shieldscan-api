@@ -515,3 +515,48 @@ async def require_jwt(
     if identity.kind != "jwt":
         raise _API_KEY_INSUFFICIENT
     return identity
+
+
+# ---------------------------------------------------------------- tenant scoping (Task 3.1)
+
+
+_NOT_FOUND = HTTPException(
+    status_code=status.HTTP_404_NOT_FOUND,
+    detail="not_found",
+)
+
+
+def require_org_membership(jwt_only: bool = False) -> Callable:
+    """Factory: return a FastAPI dep that validates the path's
+    ``org_id`` against the caller's authenticated org and SETs the
+    GUC for RLS-protected queries.
+
+    Cross-tenant attempts collapse to **404 not_found** (NOT 403)
+    so we don't leak existence of orgs/projects in other tenants
+    (mirrors ADR-012's app-layer scoping pattern + Task 2.4's
+    cross-tenant DELETE policy).
+
+    ``jwt_only=True`` additionally rejects API-key credentials with
+    403 ``api_key_insufficient_for_operation``. Use on mutation
+    endpoints that require a human in the loop (project DELETE).
+    """
+
+    async def _dep(
+        org_id: UUID,
+        identity: AuthIdentity = Depends(get_auth_identity),
+        db: AsyncSession = Depends(get_db),
+    ) -> AuthIdentity:
+        if jwt_only and identity.kind != "jwt":
+            raise _API_KEY_INSUFFICIENT
+        if identity.organization_id != org_id:
+            raise _NOT_FOUND
+        # Re-set GUC explicitly. get_auth_identity already set it for
+        # the caller's primary org, but doing it here makes the pattern
+        # uniform across endpoints and survives multi-org future work
+        # where the path's org_id might not match the JWT's "primary".
+        from sqlalchemy import text as _text
+
+        await db.execute(_text(f"SET app.current_org_id = '{org_id}'"))
+        return identity
+
+    return _dep
