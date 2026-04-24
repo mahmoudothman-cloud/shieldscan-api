@@ -91,11 +91,11 @@ def create_access_token(sub: str, extra: dict | None = None) -> str:
     makes per-token revocation (Task 2.3+) possible without
     rewriting this function.
     """
-    expire = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
-    )
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     payload: dict = {
         "sub": sub,
+        "iat": int(now.timestamp()),  # revocation hook (user-level)
         "exp": expire,
         "type": "access",
         "jti": str(uuid4()),
@@ -112,11 +112,11 @@ def create_refresh_token(sub: str) -> str:
     refresh must not cascade to the paired access token by
     accident.
     """
-    expire = datetime.now(timezone.utc) + timedelta(
-        days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS
-    )
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
         "sub": sub,
+        "iat": int(now.timestamp()),  # revocation hook (user-level)
         "exp": expire,
         "type": "refresh",
         "jti": str(uuid4()),

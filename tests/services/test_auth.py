@@ -59,6 +59,35 @@ def test_create_and_decode_jwt():
 # ---------------------------------------------------------------- jti claim
 
 
+def test_access_and_refresh_tokens_have_iat_claim_near_now():
+    """Revocation hook: tokens must carry an `iat` claim so that
+    user-level revocation (later M2: password-change endpoint) can
+    compare against a `user_revoked_before` timestamp.
+
+    Pins `iat` is:
+      - present on both token types
+      - an int (unix seconds, not datetime — stable JSON serialization)
+      - within +/- 5s of wall clock at issue
+    """
+    from app.services.auth import (
+        create_access_token,
+        create_refresh_token,
+        decode_token,
+    )
+
+    before = datetime.now(timezone.utc).timestamp()
+    access_payload = decode_token(create_access_token(sub=str(uuid4())))
+    refresh_payload = decode_token(create_refresh_token(sub=str(uuid4())))
+    after = datetime.now(timezone.utc).timestamp()
+
+    for payload in (access_payload, refresh_payload):
+        assert "iat" in payload
+        iat = payload["iat"]
+        assert isinstance(iat, int)
+        # +/- 5s tolerance — test runtime, not clock skew.
+        assert before - 5 <= iat <= after + 5
+
+
 def test_access_token_has_jti_claim():
     from app.services.auth import create_access_token, decode_token
 
