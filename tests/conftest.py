@@ -1,3 +1,39 @@
+"""Shared test fixtures.
+
+Fixture dependency graph (added across Sub-task 2.3.4):
+
+    db_session            — persistent AsyncConnection bound session with
+                            RLS + shieldscan_app role + schema applied.
+                            Used by pure-service tests that don't touch
+                            FastAPI.
+
+    fake_redis            — fresh fakeredis.aioredis.FakeRedis per test.
+                            Used by service tests (rate limiter, email
+                            verification, token revocation) and by the
+                            `client` fixture (via dep override).
+
+    email_service_stub    — fresh app.services.email.ConsoleEmailService
+                            per test; its outbox is inspectable.
+
+    existing_user         — yields (User, plaintext_password). Builds via
+                            register_identity so Org + Membership +
+                            verification email are all set up.
+
+    auth_headers          — yields {"Authorization": "Bearer <access>"}
+                            for the existing_user. Uses create_access_token
+                            directly (no round-trip through /auth/login).
+
+    client                — httpx.AsyncClient bound to app.main:app with
+                            dep overrides installed for get_db, get_redis,
+                            and get_email_service. State shared with
+                            db_session, fake_redis, email_service_stub so
+                            tests can assert on both sides.
+
+Future test authors: use `client` for endpoint tests, direct fixtures
+(db_session + fake_redis) for service tests. `auth_headers` is the
+canonical way to make an authenticated request.
+"""
+
 from __future__ import annotations
 
 import os
@@ -97,3 +133,96 @@ async def use_org(session: AsyncSession, org_id: UUID | str) -> None:
     # session.commit() calls. Each test gets a fresh connection+engine, so
     # no cross-test leakage.
     await session.execute(text(f"SET app.current_org_id = '{org_id}'"))
+
+
+# ---------------------------------------------------------------- harness fixtures
+
+
+@pytest_asyncio.fixture
+async def fake_redis():
+    """Fresh fakeredis.aioredis.FakeRedis, decode_responses=True to
+    match the production client shape (see app/redis_client.py)."""
+    from fakeredis import aioredis as fakeredis_aio
+
+    client = fakeredis_aio.FakeRedis(decode_responses=True)
+    try:
+        yield client
+    finally:
+        await client.flushall()
+        await client.aclose()
+
+
+@pytest_asyncio.fixture
+async def email_service_stub():
+    """Fresh ConsoleEmailService per test — outbox starts empty."""
+    from app.services.email import ConsoleEmailService, reset_default_service
+
+    reset_default_service()
+    yield ConsoleEmailService()
+    reset_default_service()
+
+
+@pytest_asyncio.fixture
+async def existing_user(db_session, fake_redis, email_service_stub):
+    """Register a user via the orchestrator. Yields (User, plaintext_password)
+    — tests need the plaintext to exercise /auth/login."""
+    from app.services.identity import register_identity
+
+    password = "TestPass-123-secure"
+    user = await register_identity(
+        db_session,
+        fake_redis,
+        email_service_stub,
+        email="existing@test.com",
+        password=password,
+        full_name="Existing User",
+        organization_name="Existing Co",
+    )
+    yield user, password
+
+
+@pytest_asyncio.fixture
+async def auth_headers(existing_user):
+    """Bearer headers for an access token minted for `existing_user`.
+    Skips /auth/login — use only when the endpoint under test isn't
+    login itself."""
+    from app.services.auth import create_access_token
+
+    user, _ = existing_user
+    token = create_access_token(sub=str(user.id))
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture
+async def client(db_session, fake_redis, email_service_stub):
+    """httpx.AsyncClient bound to app.main:app with get_db / get_redis /
+    get_email_service overrides installed. Shares state with the
+    db_session, fake_redis, email_service_stub fixtures so assertions
+    on both sides of a request see the same data.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from app.dependencies import get_db
+    from app.main import app
+    from app.redis_client import get_redis
+    from app.services.email import get_email_service
+
+    async def _override_db():
+        yield db_session
+
+    async def _override_redis():
+        yield fake_redis
+
+    def _override_email():
+        return email_service_stub
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_redis] = _override_redis
+    app.dependency_overrides[get_email_service] = _override_email
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+    finally:
+        app.dependency_overrides.clear()
