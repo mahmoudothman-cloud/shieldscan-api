@@ -3,9 +3,9 @@
 Single source of truth for both the Alembic migration and the test fixture
 (`tests/conftest.py`), so production and test DBs stay in lock-step.
 
-Security model
---------------
-Every tenant-scoped table has:
+Security model — two categories of tenant-scoped tables
+-------------------------------------------------------
+**TENANT_TABLES** — the default. Each table in this list has:
   * ROW LEVEL SECURITY enabled AND FORCED (so even the table owner is
     subject to the policy — no accidental bypass in migrations or dev).
   * A `tenant_isolation` policy gated on the session-local GUC
@@ -14,8 +14,21 @@ Every tenant-scoped table has:
         USING (organization_id = current_setting('app.current_org_id')::uuid)
         WITH CHECK (organization_id = current_setting('app.current_org_id')::uuid)
 
-The app layer sets this GUC at the start of every request from the JWT
-org claim; tests set it via `tests.conftest.use_org`.
+  The app layer sets the GUC at the start of every request from the JWT
+  org claim; tests set it via `tests.conftest.use_org`.
+
+**CREDENTIAL_INDEXED_TABLES** — the deliberate carve-out (see ADR-012).
+  These tables have NO RLS policy because their primary access pattern
+  is lookup-by-opaque-credential (e.g. SHA-256 of an API key plaintext),
+  which MUST precede establishing tenant context — the row is what tells
+  us which org the caller belongs to. Tenant scoping for these tables is
+  enforced at the **application layer** instead: every query either
+  matches on the credential hash (proof of ownership) or explicitly
+  filters `WHERE organization_id = :authenticated_org`.
+
+  **Adding a table here requires an ADR amendment**, not just a code
+  change — the bar is deliberately high. The justification string in
+  CREDENTIAL_INDEXED_TABLES is the forcing function for code review.
 
 audit_logs is additionally protected by BEFORE-UPDATE and BEFORE-DELETE
 triggers that raise, making it true append-only at the DB layer
@@ -25,10 +38,12 @@ triggers that raise, making it true append-only at the DB layer
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Final
 
-# Tables that live at end of M1 AND carry organization_id. Must match the
-# audit list in response C of the design audit. Non-tenant tables
-# (organizations, users, memberships) are excluded by design.
+# Default tenant-scoped tables — RLS-enforced at the DB layer.
+# Non-tenant tables (organizations, users, memberships) are excluded by
+# design. For the deliberate carve-out from RLS, see
+# CREDENTIAL_INDEXED_TABLES below.
 TENANT_TABLES: tuple[str, ...] = (
     "projects",
     "project_credentials",
@@ -41,8 +56,21 @@ TENANT_TABLES: tuple[str, ...] = (
     "mobile_uploads",
     "attack_surface",
     "audit_logs",
-    "api_keys",
 )
+
+
+# Tables that bypass RLS because their row identifier IS the credential.
+# See ADR-012 in SPECIFICATION.md for the full reasoning. Adding a table
+# to this dict REQUIRES an ADR amendment — not just a code change.
+CREDENTIAL_INDEXED_TABLES: Final[dict[str, str]] = {
+    "api_keys": (
+        "Rows identified by SHA-256(plaintext). Lookup by hash IS "
+        "authentication; RLS would prevent the lookup from succeeding "
+        "because tenant context is the RESULT of the lookup, not its "
+        "precondition. Tenant scoping enforced at the application layer "
+        "(see routes/api_keys.py list + delete handlers). See ADR-012."
+    ),
+}
 
 
 def rls_upgrade_sql() -> Iterable[str]:
