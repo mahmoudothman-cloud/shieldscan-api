@@ -519,6 +519,13 @@ async def test_19_password_change_does_not_add_jtis_to_revocation_list(
     refresh_token = create_refresh_token(sub=str(user.id))
     refresh_jti = jose_jwt.get_unverified_claims(refresh_token)["jti"]
 
+    # Ensure iat (token) and revoked_before (post-change Redis write)
+    # land in different wall-clock seconds. Without this, fast execution
+    # can produce iat == revoked_before, and the < comparison evaluates
+    # False (correct per spec — a token issued AT the revocation second
+    # is post-revocation). Equivalent pattern in tests 13/14/15.
+    time.sleep(1)
+
     r = await client.post(
         "/v1/auth/password/change",
         json={"current_password": current_pwd, "new_password": "Brand-New-Pass-456"},
