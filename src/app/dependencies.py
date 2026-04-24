@@ -1,43 +1,46 @@
-"""FastAPI dependencies for auth-protected endpoints (Sub-task 2.3.4, Commit 2).
+"""FastAPI dependencies for auth-protected endpoints.
 
 Three layers of dependencies:
 
 1. **Infrastructure:** ``get_db``, ``get_redis``, ``get_rate_limiter``.
    Yield per-request handles to the shared backends.
 
-2. **Identity:** ``get_current_user``. Parses ``Authorization: Bearer
-   <token>``, decodes the JWT, checks type + revocation status +
-   user-still-exists, returns the ``User``. Fails closed on any
-   uncertainty (including Redis outages) with HTTP 401.
+2. **Identity:** ``get_current_user`` (JWT-only), ``get_auth_identity``
+   (JWT or API key), ``require_jwt`` (JWT-only, returns full identity).
+   All three parse ``Authorization: Bearer <credential>`` and dispatch
+   based on credential kind (see ``_detect_credential_kind``).
 
 3. **Rate limiting:** ``rate_limit(scope, limit, window, id_fn=...)``
-   factory. Returns a FastAPI dependency that increments a Redis
-   fixed-window counter and raises 429 with ``Retry-After`` if over
-   the limit. Default ``id_fn`` uses the real client IP (CF header
-   / X-Forwarded-For fallback / ``request.client.host`` last).
+   factory + ``check_rate_limits`` handler-body helper.
 
 HTTP code discipline (401 vs 403):
   - **401 Unauthorized:** missing, malformed, expired, revoked, or
     invalid-type token; user-deleted-but-token-alive. The *request*
     failed authentication.
-  - **403 Forbidden:** authenticated successfully but the user's
-    state forbids the action (e.g. ``email_verified is False`` on
-    an endpoint that requires verified email). The *user* is not
-    allowed to do this thing.
+  - **403 Forbidden:** authenticated but the caller's state or
+    credential-kind forbids the action. Two canonical cases:
+      * ``email_not_verified`` on endpoints that require verified email.
+      * ``api_key_insufficient_for_operation`` on user-session endpoints
+        that reject API-key credentials (logout, refresh, api-key
+        mutations — see ADR-012 and the Task 2.4 scope).
 """
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
-from typing import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import AsyncIterator, Awaitable, Callable, Literal
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
-from app.models.identity import User
+from app.models.identity import APIKey, User
 from app.redis_client import get_redis
 from app.services.auth import (
     TokenError,
@@ -199,6 +202,16 @@ async def get_current_user(
     if not token:
         raise _UNAUTHORIZED
 
+    # (a.1) credential-kind gate: get_current_user is JWT-only. API-key
+    # credentials arriving here (user-session endpoints like /logout,
+    # /refresh, api-key mutations) get a distinct 403 so the client
+    # can distinguish "your key is valid but wrong shape for this
+    # endpoint" from "your key is bad." See Task 2.4 endpoint policy +
+    # ADR-012. This is NOT an auth failure; the credential IS
+    # authenticated — it's just not authorized for this operation.
+    if _detect_credential_kind(token) == "api_key":
+        raise _API_KEY_INSUFFICIENT
+
     # (b) decode
     try:
         payload = decode_token(token)
@@ -253,3 +266,222 @@ async def get_verified_user(
             detail="email_not_verified",
         )
     return user
+
+
+# ---------------------------------------------------------------- API key auth (Task 2.4 Commit 1)
+
+
+_API_KEY_INSUFFICIENT = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN,
+    detail="api_key_insufficient_for_operation",
+)
+
+
+def _detect_credential_kind(raw: str) -> Literal["api_key", "jwt"]:
+    """Positive-match for API keys; everything else is JWT.
+
+    API keys have a hard-pinned prefix (``ss_live_`` / ``ss_test_``)
+    per Task 2.2. JWTs are the default fall-through — the subsequent
+    JWT decode will catch any actual garbage with a 401.
+
+    Intentionally not a regex — ``startswith`` is zero-allocation,
+    obvious to readers, and the prefix is a literal contract (Task 2.2
+    `generate_api_key` emits exactly this shape).
+    """
+    if raw.startswith(("ss_live_", "ss_test_")):
+        return "api_key"
+    return "jwt"
+
+
+@dataclass(frozen=True)
+class AuthIdentity:
+    """Unified auth context returned by :func:`get_auth_identity`.
+
+    ``kind`` discriminates the credential source. For ``"jwt"``,
+    ``user`` is populated. For ``"api_key"``, ``api_key`` is populated.
+    ``organization_id`` is always populated — it's the tenant the
+    caller authenticated as.
+    """
+
+    kind: Literal["jwt", "api_key"]
+    organization_id: UUID
+    user: User | None = None
+    api_key: APIKey | None = None
+
+
+# last_used_at update is fire-and-forget (latency-sensitive auth path)
+# with a 60-second debounce (write-amplification-sensitive under load).
+# See DRIFT-LOG 2026-04-21 fire-and-forget entry.
+_API_KEY_LAST_USED_DEBOUNCE = 60  # seconds
+
+
+async def _update_api_key_last_used(key_id: UUID, when: datetime) -> None:
+    """Background UPDATE for api_keys.last_used_at. Runs in its own
+    session because the request-scoped session may be closed by the
+    time this task fires. Failures are logged but not surfaced — the
+    caller's request must have already returned by the time we get
+    here, so there's nothing to "fail" anyway.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(APIKey).where(APIKey.id == key_id).values(last_used_at=when)
+            )
+            await session.commit()
+    except Exception as e:
+        logger.error("api_key last_used_at update failed for %s: %s", key_id, e)
+
+
+def _maybe_schedule_last_used_update(
+    key: APIKey,
+    *,
+    scheduler: Callable[[Awaitable[None]], object] = asyncio.create_task,
+    now: datetime | None = None,
+) -> bool:
+    """If the key's last_used_at is stale (>60s) or None, schedule a
+    fire-and-forget UPDATE. Returns whether a task was scheduled
+    (so tests can assert on the debounce).
+
+    ``scheduler`` is injected for testability — the default is
+    ``asyncio.create_task`` (fire-and-forget); tests pass a list's
+    ``append`` to capture the coroutine without actually running it.
+    """
+    _now = now if now is not None else datetime.now(timezone.utc)
+    if key.last_used_at is None or (
+        _now - key.last_used_at
+    ).total_seconds() > _API_KEY_LAST_USED_DEBOUNCE:
+        scheduler(_update_api_key_last_used(key.id, _now))
+        return True
+    return False
+
+
+async def _authenticate_api_key(
+    db: AsyncSession,
+    plaintext: str,
+) -> APIKey | None:
+    """Look up an active API key by SHA-256(plaintext). Returns the row
+    or ``None`` (wrong hash OR row exists but ``revoked_at`` set).
+
+    NOTE: the ``revoked_at IS NULL`` filter is load-bearing. Omitting
+    it would let revoked keys continue to authenticate — the classic
+    "forgot the WHERE clause" failure mode that ADR-012's posture
+    makes equivalent to "forgot the RLS policy." Regression test
+    pins the behavior.
+
+    On success, also sets ``app.current_org_id`` GUC so subsequent
+    queries in the request are tenant-scoped correctly.
+    """
+    key_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    result = await db.execute(
+        select(APIKey).where(
+            APIKey.key_hash == key_hash,
+            APIKey.revoked_at.is_(None),
+        )
+    )
+    key = result.scalar_one_or_none()
+    if key is None:
+        return None
+    await db.execute(
+        text(f"SET app.current_org_id = '{key.organization_id}'")
+    )
+    _maybe_schedule_last_used_update(key)
+    return key
+
+
+async def get_auth_identity(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+) -> AuthIdentity:
+    """Unified auth entrypoint. Accepts JWT or API key in
+    ``Authorization: Bearer <credential>``. Returns an ``AuthIdentity``
+    discriminated on ``kind``.
+
+    Use this dep for endpoints that accept either credential (e.g.
+    ``GET /auth/me``, ``GET /auth/api-keys``). Use ``get_current_user``
+    or ``require_jwt`` for user-session-only endpoints.
+
+    All failure paths collapse to a uniform 401 to prevent enumeration
+    of which check failed.
+    """
+    header = request.headers.get("Authorization")
+    if not header or not header.lower().startswith("bearer "):
+        raise _UNAUTHORIZED
+    raw = header.split(" ", 1)[1].strip()
+    if not raw:
+        raise _UNAUTHORIZED
+
+    kind = _detect_credential_kind(raw)
+    if kind == "api_key":
+        key = await _authenticate_api_key(db, raw)
+        if key is None:
+            raise _UNAUTHORIZED
+        return AuthIdentity(
+            kind="api_key",
+            organization_id=key.organization_id,
+            api_key=key,
+        )
+
+    # JWT path — re-implemented inline rather than calling
+    # get_current_user so we don't re-parse the header and so the 403
+    # gate in get_current_user doesn't trip.
+    try:
+        payload = decode_token(raw)
+    except (TokenExpiredError, TokenInvalidError, TokenError):
+        raise _UNAUTHORIZED
+    if payload.get("type") != "access":
+        raise _UNAUTHORIZED
+    jti = payload.get("jti")
+    if not jti:
+        raise _UNAUTHORIZED
+    try:
+        if await is_revoked(redis, jti):
+            raise _UNAUTHORIZED
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("redis revocation check failed: %s", e)
+        raise _UNAUTHORIZED from e
+    sub = payload.get("sub")
+    if not sub:
+        raise _UNAUTHORIZED
+    try:
+        user_id = UUID(sub)
+    except (ValueError, TypeError):
+        raise _UNAUTHORIZED
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise _UNAUTHORIZED
+
+    # Resolve the user's primary org for tenant context. A user can
+    # belong to multiple orgs; current behavior uses their first
+    # membership. Multi-org UX is a later M-task.
+    from app.models.identity import Membership
+
+    result = await db.execute(
+        select(Membership.organization_id)
+        .where(Membership.user_id == user.id)
+        .limit(1)
+    )
+    org_id = result.scalar_one_or_none()
+    if org_id is None:
+        # A user with zero memberships can't authenticate against any
+        # tenant-scoped endpoint. Treat as 401 (same as user-deleted).
+        raise _UNAUTHORIZED
+    await db.execute(text(f"SET app.current_org_id = '{org_id}'"))
+
+    return AuthIdentity(kind="jwt", organization_id=org_id, user=user)
+
+
+async def require_jwt(
+    identity: AuthIdentity = Depends(get_auth_identity),
+) -> AuthIdentity:
+    """Like ``get_auth_identity`` but rejects API-key credentials with
+    403 ``api_key_insufficient_for_operation``. Use on user-session
+    operations where an API key is not semantically valid (logout,
+    refresh, api-key mutations).
+    """
+    if identity.kind != "jwt":
+        raise _API_KEY_INSUFFICIENT
+    return identity
