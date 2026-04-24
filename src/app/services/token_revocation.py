@@ -41,9 +41,15 @@ async def revoke(
     """Mark ``jti`` revoked until its natural expiry.
 
     ``exp_unix`` is the token's ``exp`` claim (unix seconds). TTL is
-    computed as ``exp_unix - now``; if the token is already expired
-    the entry is skipped (no point storing a key Redis would immediately
-    evict, and ``SET EX 0`` is an error on some Redis builds).
+    computed as ``exp_unix - now``; behavior at the floor:
+
+      - ``ttl <= 0``  (token already expired):   skipped — no Redis write.
+                      ``SET EX 0`` is an error on some Redis builds.
+      - ``0 < ttl < 1``: cannot arise with integer ``exp_unix``
+                      (int subtraction of ints yields an int). If a
+                      future caller passes a float, round **up** to 1
+                      second before calling ``SET EX`` — never 0.
+      - ``ttl >= 1``:   used as-is.
 
     Idempotent: calling twice for the same jti is safe — the second
     call simply overwrites with the same value and a slightly smaller
