@@ -108,6 +108,27 @@ class LogoutRequest(BaseModel):
     refresh_token: str = Field(min_length=1)
 
 
+class VerifyEmailRequest(BaseModel):
+    """``POST /auth/verify-email`` body. Token is the plaintext value
+    from the verification link; its SHA-256 is GETDEL'd from Redis."""
+
+    token: str = Field(min_length=1)
+
+
+class ResendVerificationRequest(BaseModel):
+    """``POST /auth/resend-verification`` body. Email normalization
+    here feeds the rate-limit bucket — without it, case-varied inputs
+    would evade the per-email limit (`Alice@x.com` and `alice@x.com`
+    would share zero counter state)."""
+
+    email: EmailStr
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
+
+
 # ---------------------------------------------------------------- responses
 
 

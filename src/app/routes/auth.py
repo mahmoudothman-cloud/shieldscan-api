@@ -33,6 +33,7 @@ Design pins (see ADR-011 + DRIFT-LOG 2026-04-21):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from uuid import UUID
 
@@ -63,8 +64,10 @@ from app.schemas.auth import (
     LogoutRequest,
     RefreshRequest,
     RegisterRequest,
+    ResendVerificationRequest,
     TokenResponse,
     UserResponse,
+    VerifyEmailRequest,
 )
 from app.services.audit import AuthAction, audit
 from app.services.auth import (
@@ -77,6 +80,10 @@ from app.services.auth import (
     verify_password,
 )
 from app.services.email import EmailService, get_email_service
+from app.services.email_verification import (
+    EMAIL_VERIFY_PREFIX,
+    issue_email_verification_token,
+)
 from app.services.identity import (
     EmailAlreadyRegistered,
     SlugGenerationFailed,
@@ -454,3 +461,159 @@ async def me(
             else None
         ),
     )
+
+
+# ---------------------------------------------------------------- verify-email (Task 2.5)
+
+
+_INVALID_TOKEN = HTTPException(
+    status_code=status.HTTP_400_BAD_REQUEST,
+    detail="invalid_or_expired_token",
+)
+
+_RESEND_OK = {"detail": "verification_email_sent_if_account_exists"}
+
+
+@router.post("/verify-email")
+async def verify_email(
+    body: VerifyEmailRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+) -> dict:
+    """Consume an email-verification token.
+
+    **Unauthenticated** — the token IS the credential. All failure
+    modes (nonexistent, expired-via-TTL, user-deleted, previously-used)
+    collapse to an identical 400 body per no-enumeration policy. See
+    DRIFT-LOG 2026-04-21 email-verification policy notes.
+
+    Single-use enforcement: ``GETDEL`` is atomic — the key is removed
+    as part of the read, preventing a race where two concurrent
+    replays both see the token and both succeed.
+    """
+    token_hash = hashlib.sha256(body.token.encode("utf-8")).hexdigest()
+    key = f"{EMAIL_VERIFY_PREFIX}:{token_hash}"
+
+    # GETDEL: atomic read-and-delete. If the key is missing (expired,
+    # nonexistent, already consumed), returns None.
+    try:
+        user_id_raw = await redis.getdel(key)
+    except Exception as e:
+        logger.error("redis getdel failed on /verify-email: %s", e)
+        raise _INVALID_TOKEN from e
+
+    if user_id_raw is None:
+        raise _INVALID_TOKEN
+
+    try:
+        user_id = UUID(user_id_raw)
+    except (ValueError, TypeError):
+        # Stored value was malformed — shouldn't happen, but don't
+        # confirm anything to the caller.
+        raise _INVALID_TOKEN
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        # User deleted after token issuance. Token is already gone
+        # (GETDEL consumed it); nothing more to do.
+        raise _INVALID_TOKEN
+
+    # Idempotent: if already verified, skip the UPDATE + audit — we
+    # don't log no-op events (per Task 2.5 design decision #6).
+    if not user.email_verified:
+        user.email_verified = True
+        org_id = await _first_org_id_for(db, user.id)
+        if org_id is not None:
+            await audit(
+                db,
+                organization_id=org_id,
+                actor_id=user.id,
+                action=AuthAction.EMAIL_VERIFIED,
+                resource_type="user",
+                resource_id=user.id,
+                ip_address=get_real_ip(request),
+                user_agent=request.headers.get("User-Agent"),
+                details={"method": "email"},
+            )
+        await db.commit()
+
+    return {"email_verified": True}
+
+
+# ---------------------------------------------------------------- resend-verification (Task 2.5)
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    body: ResendVerificationRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+    email_service: EmailService = Depends(get_email_service),
+    limiter: RateLimiter = Depends(get_rate_limiter),
+) -> dict:
+    """Re-issue a verification email.
+
+    **Unauthenticated** — the caller can't log in until verified, so
+    gating resend on login would create a lockout. Every outcome
+    (account doesn't exist, already verified, rate-limited,
+    successfully resent) returns the same 200 body per no-enumeration
+    policy.
+
+    Rate limit runs FIRST, independent of whether the account exists
+    (see DRIFT-LOG entry: otherwise the limiter's trip signal is an
+    existence oracle).
+    """
+    # Normalized email — already lowercased/stripped by the schema
+    # validator via normalize_email().
+    email = body.email
+
+    # Rate limit BEFORE any DB lookup — runs for nonexistent emails
+    # too, so 429 behavior doesn't differ by existence. On denial we
+    # silently drop and return the generic 200 (no 429 leakage).
+    result = await limiter.check(
+        "resend_verification_email", email, limit=3, window_seconds=3600
+    )
+    if not result.allowed:
+        return _RESEND_OK
+
+    # Best-effort resend. Every branch below returns the same body.
+    user_row = await db.execute(select(User).where(User.email == email))
+    user = user_row.scalar_one_or_none()
+
+    if user is not None and not user.email_verified:
+        # Issue a fresh token (old one still exists in Redis if the
+        # user had requested before; both remain valid until TTL —
+        # user may click either link). This is intentional: old links
+        # in older emails shouldn't break.
+        token_plaintext = await issue_email_verification_token(redis, user.id)
+        await email_service.send(
+            to=user.email,
+            subject="Verify your ShieldScan email",
+            body=(
+                f"Hi {user.full_name},\n\n"
+                f"Click to verify your email: "
+                f"https://app.shieldscan.io/verify-email?token={token_plaintext}\n\n"
+                f"Link expires in 24 hours."
+            ),
+            template="verify_email",
+        )
+
+        org_id = await _first_org_id_for(db, user.id)
+        if org_id is not None:
+            await audit(
+                db,
+                organization_id=org_id,
+                actor_id=user.id,
+                action=AuthAction.EMAIL_VERIFICATION_SENT,
+                resource_type="user",
+                resource_id=user.id,
+                ip_address=get_real_ip(request),
+                user_agent=request.headers.get("User-Agent"),
+                details={"method": "email"},
+            )
+            await db.commit()
+
+    return _RESEND_OK
