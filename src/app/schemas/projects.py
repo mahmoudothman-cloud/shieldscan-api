@@ -142,3 +142,38 @@ def _validate_sort_key(v: str) -> str:
 
 PageNumber = Annotated[int, Field(ge=1)]
 PerPage = Annotated[int, Field(ge=1, le=100)]
+
+
+# ---------------------------------------------------------------- /verify (Task 3.2)
+
+
+class VerifyDomainRequest(BaseModel):
+    """``POST /v1/orgs/{org_id}/projects/{id}/verify`` body."""
+
+    method: str = Field(min_length=1)
+
+    @field_validator("method")
+    @classmethod
+    def _validate_method(cls, v: str) -> str:
+        if v not in {"dns_txt", "meta_tag"}:
+            raise ValueError("method must be one of: dns_txt, meta_tag")
+        return v
+
+
+class VerifyDomainSuccess(BaseModel):
+    """200 body on successful verification."""
+
+    verified: bool = True
+    method: str
+    project: ProjectResponse
+
+
+class VerifyDomainFailure(BaseModel):
+    """400 body on verification failure. ``expected_record`` shows
+    the customer exactly what to add to make verification succeed
+    on retry — substantial UX win (Task 3.2 §C extra)."""
+
+    detail: str = "verification_failed"
+    method: str
+    failure_reason: str
+    expected_record: str

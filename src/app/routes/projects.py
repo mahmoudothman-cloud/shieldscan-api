@@ -41,7 +41,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
     AuthIdentity,
+    check_rate_limits,
     get_db,
+    get_rate_limiter,
     get_real_ip,
     require_org_membership,
 )
@@ -55,8 +57,17 @@ from app.schemas.projects import (
     ProjectCreateRequest,
     ProjectResponse,
     ProjectUpdateRequest,
+    VerifyDomainFailure,
+    VerifyDomainRequest,
+    VerifyDomainSuccess,
+)
+from app.services.domain_verify import (
+    VerifyResult,
+    verify_dns_txt,
+    verify_meta_tag,
 )
 from app.services.projects import extract_root_domain
+from app.services.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -302,3 +313,111 @@ async def _load_project(
         Project.organization_id == org_id,
     )
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+# ---------------------------------------------------------------- domain verification (Task 3.2)
+
+
+@router.post("/{project_id}/verify")
+async def verify_domain(
+    org_id: UUID,
+    project_id: UUID,
+    body: VerifyDomainRequest,
+    request: Request,
+    identity: AuthIdentity = Depends(require_org_membership()),
+    db: AsyncSession = Depends(get_db),
+    limiter: RateLimiter = Depends(get_rate_limiter),
+):
+    """Verify domain ownership for a project.
+
+    Two methods supported:
+      - ``dns_txt``  — DNS TXT record at ``_shieldscan-verify.<root>``
+      - ``meta_tag`` — HTML meta tag in the ``target_url`` page
+
+    Auth: JWT or API-key, any org member (verification is a setup
+    action, not a security mutation in the 403-required sense).
+
+    Rate-limited 5/hour per project (DNS lookups + outbound HTTP have
+    real cost; legitimate users verify once at setup, occasionally
+    on re-aim). Identifier = project_id, scope = ``project_domain_verify``.
+
+    On success: ``project.domain_verified = True``, audit
+    ``PROJECT_DOMAIN_VERIFIED``, return 200 with the project body.
+    On failure: ``domain_verified`` left UNCHANGED (re-verify on
+    already-verified project that fails keeps verified=True — DNS
+    can be flaky; one failure shouldn't downgrade historical state).
+    Audit ``PROJECT_DOMAIN_VERIFICATION_FAILED`` with reason in
+    details. Return 400 with ``expected_record`` for UX.
+    """
+    # Per-project rate limit. Returning 429 (not silent-drop) here
+    # because /verify is an authenticated endpoint where the caller
+    # legitimately needs to know they're being throttled.
+    await check_rate_limits(
+        limiter,
+        [("project_domain_verify", str(project_id), 5, 3600)],
+    )
+
+    project = await _load_project(db, org_id, project_id)
+    if project is None:
+        raise _NOT_FOUND
+
+    # Dispatch on method.
+    result: VerifyResult
+    if body.method == "dns_txt":
+        result = await verify_dns_txt(project.root_domain, project.verification_token)
+    elif body.method == "meta_tag":
+        result = await verify_meta_tag(project.target_url, project.verification_token)
+    else:  # pragma: no cover — schema validator guards this
+        raise HTTPException(status_code=422, detail="invalid method")
+
+    actor_id = identity.user.id if identity.user is not None else None
+    ip = get_real_ip(request)
+    ua = request.headers.get("User-Agent")
+
+    if result.verified:
+        # Flip if not already verified; re-verify is idempotent (no
+        # state change on an already-True row).
+        was_already_verified = project.domain_verified
+        if not was_already_verified:
+            project.domain_verified = True
+        await audit(
+            db,
+            organization_id=org_id,
+            actor_id=actor_id,
+            action=ProjectAction.PROJECT_DOMAIN_VERIFIED,
+            resource_type="project",
+            resource_id=project.id,
+            ip_address=ip,
+            user_agent=ua,
+            details={"method": body.method},
+        )
+        await db.commit()
+        await db.refresh(project)
+        return VerifyDomainSuccess(
+            method=body.method,
+            project=ProjectResponse.model_validate(project),
+        )
+
+    # Failure path. domain_verified stays as-is — re-verify on an
+    # already-verified project that fails today does NOT downgrade
+    # to False (Task 3.2 #3 refinement; DNS is occasionally flaky).
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=actor_id,
+        action=ProjectAction.PROJECT_DOMAIN_VERIFICATION_FAILED,
+        resource_type="project",
+        resource_id=project.id,
+        ip_address=ip,
+        user_agent=ua,
+        details={"method": body.method, "reason": result.failure_reason},
+    )
+    await db.commit()
+    raise HTTPException(
+        status_code=400,
+        detail=VerifyDomainFailure(
+            method=body.method,
+            failure_reason=result.failure_reason or "unknown",
+            expected_record=result.expected_record or "",
+        ).model_dump(),
+    )
