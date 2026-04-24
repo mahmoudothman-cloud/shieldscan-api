@@ -66,6 +66,12 @@ class AuthAction(str, PyEnum):
 class AuditDetails(TypedDict, total=False):
     """Event-specific structured payload for ``audit_logs.details``.
 
+    Holds event-specific metadata only. Request-context fields
+    (``ip_address``, ``user_agent``) are top-level columns on
+    ``audit_logs``, not part of ``details`` — they use dedicated
+    INET/Text columns for indexable CIDR queries. Populate them via
+    the ``audit()`` kwargs.
+
     All keys optional — set only the ones relevant to the emitting
     event. Do NOT add free-form strings: future analytics queries
     need these fields to stay indexable via JSONB operators.
@@ -75,6 +81,7 @@ class AuditDetails(TypedDict, total=False):
     target_user_id: str  # UUID as str for JSONB stability (UUIDs are not JSON-native)
     api_key_prefix: str
     token_jti: str
+    method: str  # e.g. "email", "sms" — channel for verification/reset actions
 
 
 async def audit(
