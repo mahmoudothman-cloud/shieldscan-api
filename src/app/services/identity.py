@@ -179,6 +179,13 @@ async def register_identity(
             f"password exceeds bcrypt's {MAX_PASSWORD_BYTES}-byte limit"
         )
 
+    # Defensive email normalization: HTTP callers already went through
+    # the RegisterRequest @field_validator, but non-HTTP callers (CLI
+    # scripts, background jobs, future admin tools) land here directly.
+    # Redundant for HTTP path, load-bearing for every other caller.
+    # See DRIFT-LOG 2026-04-21 email-normalization entry.
+    email = email.strip().lower()
+
     # Transaction order (per user-approved sequencing):
     #   open tx → org (slug retry) → user (flush) → mint verify
     #   token against user.id → membership → audits → commit →

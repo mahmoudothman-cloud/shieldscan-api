@@ -29,6 +29,24 @@ PASSWORD_MIN_BYTES = 8
 PASSWORD_MAX_BYTES = 72  # bcrypt ceiling per ADR-010
 
 
+def normalize_email(email: str) -> str:
+    """Canonical form for email comparison across register / login /
+    resend-verification. Strip surrounding whitespace, lowercase the
+    whole address (Pydantic EmailStr only lowercases the domain).
+
+    Applied at three layers (defense-in-depth):
+      - Pydantic ``@field_validator`` on every ``EmailStr`` request
+        field (schemas/auth.py + schemas/api_keys.py if applicable).
+      - ``register_identity`` redundantly normalizes for non-HTTP
+        callers (CLI tools, background jobs).
+      - DB ``CHECK (email = lower(email))`` as the last line.
+
+    See DRIFT-LOG 2026-04-21 email-normalization entry for the bug
+    this closes (case-varied duplicate registration / login lock-out).
+    """
+    return email.strip().lower()
+
+
 # ---------------------------------------------------------------- requests
 
 
@@ -39,6 +57,11 @@ class RegisterRequest(BaseModel):
     password: str
     full_name: str = Field(min_length=1, max_length=255)
     organization_name: str = Field(min_length=1, max_length=255)
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
 
     @field_validator("password")
     @classmethod
@@ -70,6 +93,11 @@ class LoginRequest(BaseModel):
 
     email: EmailStr
     password: str
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
 
 
 class RefreshRequest(BaseModel):

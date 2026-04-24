@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     CHAR,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -56,6 +57,13 @@ class Organization(Base, TimestampMixin):
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
+    __table_args__ = (
+        # Defense-in-depth email normalization (Task 2.5 Commit 1a):
+        # schema validator + orchestrator normalization are the first
+        # two layers; this CHECK catches raw-SQL inserts that bypass
+        # both. See DRIFT-LOG 2026-04-21 email-normalization entry.
+        CheckConstraint("email = lower(email)", name="users_email_normalized"),
+    )
 
     id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True), primary_key=True, default=uuid4
