@@ -146,6 +146,41 @@ class PasswordChangeRequest(BaseModel):
         return validate_password_shape(v)
 
 
+class ForgotPasswordRequest(BaseModel):
+    """``POST /auth/forgot-password`` body. Email normalization here
+    feeds the per-email rate-limit bucket — without it, case-varied
+    inputs would evade the limiter (same enumeration concern as
+    ``ResendVerificationRequest``)."""
+
+    email: EmailStr
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _normalize_email(cls, v: str) -> str:
+        return normalize_email(v)
+
+
+class ResetPasswordRequest(BaseModel):
+    """``POST /auth/reset-password`` body. ``token`` is the plaintext
+    from the reset link; its SHA-256 is GETDEL'd from Redis.
+
+    ``new_password`` reuses the shared password-shape validator. We
+    do NOT reject "new equals current" here (unlike
+    ``PasswordChangeRequest``): the user reaching this endpoint by
+    definition does not remember their current password, so checking
+    against it would be theatre. See Task 2.Y DRIFT-LOG entry on
+    the asymmetry.
+    """
+
+    token: str = Field(min_length=1)
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _validate_new_password(cls, v: str) -> str:
+        return validate_password_shape(v)
+
+
 class ResendVerificationRequest(BaseModel):
     """``POST /auth/resend-verification`` body. Email normalization
     here feeds the rate-limit bucket — without it, case-varied inputs

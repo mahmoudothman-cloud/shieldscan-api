@@ -64,12 +64,14 @@ from app.schemas.api_keys import (
     OrganizationSummary,
 )
 from app.schemas.auth import (
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     PasswordChangeRequest,
     RefreshRequest,
     RegisterRequest,
     ResendVerificationRequest,
+    ResetPasswordRequest,
     TokenResponse,
     UserResponse,
     VerifyEmailRequest,
@@ -89,6 +91,10 @@ from app.services.email import EmailService, get_email_service
 from app.services.email_verification import (
     EMAIL_VERIFY_PREFIX,
     issue_email_verification_token,
+)
+from app.services.password_reset import (
+    PASSWORD_RESET_PREFIX,
+    issue_password_reset_token,
 )
 from app.services.identity import (
     EmailAlreadyRegistered,
@@ -746,5 +752,177 @@ async def change_password(
         # Don't raise — the password DID change successfully. Returning
         # 5xx after a successful state mutation would mislead the
         # client into thinking the change failed.
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------- password reset (Task 2.Y)
+
+
+_FORGOT_PASSWORD_OK = {
+    "detail": "password_reset_email_sent_if_account_exists"
+}
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+    email_service: EmailService = Depends(get_email_service),
+    limiter: RateLimiter = Depends(get_rate_limiter),
+) -> dict:
+    """Initiate a password reset.
+
+    **Unauthenticated** — by definition the user has lost the ability
+    to authenticate. All outcomes (account doesn't exist, account
+    exists, IP rate-limited, email rate-limited) return the same
+    generic 200 body. Both rate limits run FIRST (in the handler
+    body, not as deps), independent of whether the account exists,
+    to keep their trip signal from being an existence oracle.
+
+    Note: the IP limit is checked in the handler body, NOT as a
+    ``Depends(rate_limit(...))``, because the dep raises 429 — which
+    would defeat the silent-drop policy. Mirrors resend-verification.
+    """
+    email = body.email  # already normalized via the schema validator
+
+    # Per-IP rate limit — silent-drop on trip.
+    ip_result = await limiter.check(
+        "forgot_password_ip",
+        get_real_ip(request),
+        limit=10,
+        window_seconds=3600,
+    )
+    if not ip_result.allowed:
+        return _FORGOT_PASSWORD_OK
+
+    # Per-email rate limit — runs even for nonexistent accounts.
+    result = await limiter.check(
+        "forgot_password_email", email, limit=3, window_seconds=3600
+    )
+    if not result.allowed:
+        return _FORGOT_PASSWORD_OK
+
+    user_row = await db.execute(select(User).where(User.email == email))
+    user = user_row.scalar_one_or_none()
+
+    if user is not None:
+        token_plaintext = await issue_password_reset_token(redis, user.id)
+        await email_service.send(
+            to=user.email,
+            subject="Reset your ShieldScan password",
+            body=(
+                f"Hi {user.full_name},\n\n"
+                f"Click to reset your password: "
+                f"https://app.shieldscan.io/reset-password?token={token_plaintext}\n\n"
+                f"Link expires in 1 hour. If you didn't request this, "
+                f"ignore this email — your password will not change."
+            ),
+            template="password_reset",
+        )
+        org_id = await _first_org_id_for(db, user.id)
+        if org_id is not None:
+            await audit(
+                db,
+                organization_id=org_id,
+                actor_id=user.id,
+                action=AuthAction.PASSWORD_RESET_REQUESTED,
+                resource_type="user",
+                resource_id=user.id,
+                ip_address=get_real_ip(request),
+                user_agent=request.headers.get("User-Agent"),
+                details={"method": "email"},
+            )
+            await db.commit()
+
+    return _FORGOT_PASSWORD_OK
+
+
+@router.post(
+    "/reset-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[
+        Depends(rate_limit("reset_password_ip", limit=20, window=3600))
+    ],
+)
+async def reset_password(
+    body: ResetPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+) -> Response:
+    """Consume a password-reset token + set a new password.
+
+    **Unauthenticated** — the token IS the credential.
+    All failure modes (invalid, expired, replay, deleted-user) collapse
+    to ``400 invalid_or_expired_token`` per no-enumeration policy.
+
+    On success: updates ``user.hashed_password``, audits
+    ``PASSWORD_RESET_COMPLETED``, and **calls
+    ``set_user_revoked_before``** to invalidate every token issued
+    before the reset (mandatory — see Task 2.Y scope §C.4 / ADR-011).
+
+    Does NOT change ``user.email_verified``. Reset and verification
+    are distinct flows; coupling them would silently change account
+    state. See DRIFT-LOG 2026-04-23 entry.
+    """
+    token_hash = hashlib.sha256(body.token.encode("utf-8")).hexdigest()
+    key = f"{PASSWORD_RESET_PREFIX}:{token_hash}"
+
+    try:
+        user_id_raw = await redis.getdel(key)
+    except Exception as e:
+        logger.error("redis getdel failed on /reset-password: %s", e)
+        raise _INVALID_TOKEN from e
+
+    if user_id_raw is None:
+        raise _INVALID_TOKEN
+
+    try:
+        user_id = UUID(user_id_raw)
+    except (ValueError, TypeError):
+        raise _INVALID_TOKEN
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise _INVALID_TOKEN
+
+    # Hash + persist + audit (one transaction).
+    user.hashed_password = hash_password(body.new_password)
+    org_id = await _first_org_id_for(db, user.id)
+    if org_id is not None:
+        await audit(
+            db,
+            organization_id=org_id,
+            actor_id=user.id,
+            action=AuthAction.PASSWORD_RESET_COMPLETED,
+            resource_type="user",
+            resource_id=user.id,
+            ip_address=get_real_ip(request),
+            user_agent=request.headers.get("User-Agent"),
+            details={"method": "email"},
+        )
+    await db.commit()
+
+    # AFTER commit: user-level revocation. Reset is a forced password
+    # change — every pre-reset token must be invalidated. ADR-011.
+    now_ts = int(time.time())
+    ttl = settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 86_400
+    try:
+        await set_user_revoked_before(redis, user.id, now_ts, ttl_seconds=ttl)
+    except Exception as e:
+        logger.error(
+            "set_user_revoked_before failed for user=%s after successful "
+            "password reset: %s. Old tokens remain valid until natural "
+            "expiry. Re-running the reset will retry the Redis write.",
+            user.id,
+            e,
+        )
+        # Don't raise: password DID change. Same posture as
+        # /password/change — a 5xx after a successful state mutation
+        # would mislead the client into retrying (and re-changing).
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
