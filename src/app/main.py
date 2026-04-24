@@ -29,6 +29,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.db import AsyncSessionLocal
 from app.redis_client import close_redis, get_redis, init_redis
+from app.routes import api_keys as api_keys_routes
 from app.routes import auth as auth_routes
 
 logger = logging.getLogger(__name__)
@@ -109,3 +110,4 @@ async def ready(redis=Depends(get_redis)) -> Any:
 
 
 app.include_router(auth_routes.router, prefix="/v1")
+app.include_router(api_keys_routes.router, prefix="/v1")

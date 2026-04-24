@@ -42,7 +42,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
+    AuthIdentity,
     check_rate_limits,
+    get_auth_identity,
     get_current_user,
     get_db,
     get_rate_limiter,
@@ -51,6 +53,11 @@ from app.dependencies import (
 )
 from app.models.identity import User
 from app.redis_client import get_redis
+from app.schemas.api_keys import (
+    APIKeySummary,
+    AuthIdentityResponse,
+    OrganizationSummary,
+)
 from app.schemas.auth import (
     LoginRequest,
     LogoutRequest,
@@ -411,6 +418,39 @@ async def logout(
 # ---------------------------------------------------------------- me
 
 
-@router.get("/me", response_model=UserResponse)
-async def me(current: User = Depends(get_current_user)) -> UserResponse:
-    return UserResponse.model_validate(current)
+@router.get("/me", response_model=AuthIdentityResponse)
+async def me(
+    identity: AuthIdentity = Depends(get_auth_identity),
+    db: AsyncSession = Depends(get_db),
+) -> AuthIdentityResponse:
+    """Dual-credential identity endpoint. Returns a discriminated-union
+    shape — clients branch on ``kind``:
+      - ``"jwt"``:    ``user`` populated, ``api_key`` null
+      - ``"api_key"``: ``api_key`` populated, ``user`` null
+
+    BREAKING CHANGE vs Task 2.3 shape (flat UserResponse). Intentional
+    pre-launch reshape — no external clients yet. See DRIFT-LOG
+    2026-04-21 entry on /auth/me contract change (Task 2.4 Commit 2).
+    """
+    # Load the org for the embedded summary.
+    from app.models.identity import Organization
+
+    org_result = await db.execute(
+        select(Organization).where(Organization.id == identity.organization_id)
+    )
+    org = org_result.scalar_one()
+
+    return AuthIdentityResponse(
+        kind=identity.kind,
+        organization=OrganizationSummary.model_validate(org),
+        user=(
+            UserResponse.model_validate(identity.user)
+            if identity.user is not None
+            else None
+        ),
+        api_key=(
+            APIKeySummary.model_validate(identity.api_key)
+            if identity.api_key is not None
+            else None
+        ),
+    )

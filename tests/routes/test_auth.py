@@ -398,14 +398,21 @@ async def test_logout_does_not_revoke_access_token(
 
 
 @pytest.mark.asyncio
-async def test_me_returns_user(client, existing_user, auth_headers):
+async def test_me_returns_identity_for_jwt(client, existing_user, auth_headers):
+    """Task 2.4: /auth/me now returns AuthIdentityResponse (discriminated
+    union). For a JWT caller, kind='jwt', user populated, api_key null."""
     user, _ = existing_user
     r = await client.get("/v1/auth/me", headers=auth_headers)
     assert r.status_code == 200
     body = r.json()
-    assert body["email"] == user.email
-    assert "hashed_password" not in body
-    assert "password" not in body
+    assert body["kind"] == "jwt"
+    assert body["user"]["email"] == user.email
+    assert body["api_key"] is None
+    assert "organization" in body
+    assert body["organization"]["slug"] == "existing-co"
+    # No credentials leak.
+    assert "hashed_password" not in r.text
+    assert "password" not in body["user"]
 
 
 @pytest.mark.asyncio
