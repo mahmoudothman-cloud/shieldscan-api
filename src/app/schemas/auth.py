@@ -47,6 +47,32 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def validate_password_shape(v: str) -> str:
+    """Shared password-shape validator — used by RegisterRequest
+    (initial password) and PasswordChangeRequest (new password).
+
+    Centralizing here ensures the two validators don't drift; if
+    we tighten the policy later (e.g. raise minimum length, ban
+    common dictionary words), there's one place to do it.
+    """
+    encoded = v.encode("utf-8")
+    if len(encoded) < PASSWORD_MIN_BYTES:
+        raise ValueError(
+            f"password must be at least {PASSWORD_MIN_BYTES} bytes"
+        )
+    if len(encoded) > PASSWORD_MAX_BYTES:
+        raise ValueError(
+            f"password must be at most {PASSWORD_MAX_BYTES} bytes "
+            "(bcrypt limit; note that some Unicode characters are "
+            "multi-byte)"
+        )
+    if not any(c.isalpha() for c in v):
+        raise ValueError("password must contain at least one letter")
+    if not any(c.isdigit() for c in v):
+        raise ValueError("password must contain at least one digit")
+    return v
+
+
 # ---------------------------------------------------------------- requests
 
 
@@ -66,24 +92,7 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str) -> str:
-        # Length check in BYTES, not chars — bcrypt limit is bytewise.
-        encoded = v.encode("utf-8")
-        if len(encoded) < PASSWORD_MIN_BYTES:
-            raise ValueError(
-                f"password must be at least {PASSWORD_MIN_BYTES} bytes"
-            )
-        if len(encoded) > PASSWORD_MAX_BYTES:
-            raise ValueError(
-                f"password must be at most {PASSWORD_MAX_BYTES} bytes "
-                "(bcrypt limit; note that some Unicode characters are "
-                "multi-byte)"
-            )
-        # Structural requirements: >=1 letter and >=1 digit.
-        if not any(c.isalpha() for c in v):
-            raise ValueError("password must contain at least one letter")
-        if not any(c.isdigit() for c in v):
-            raise ValueError("password must contain at least one digit")
-        return v
+        return validate_password_shape(v)
 
 
 class LoginRequest(BaseModel):
@@ -113,6 +122,28 @@ class VerifyEmailRequest(BaseModel):
     from the verification link; its SHA-256 is GETDEL'd from Redis."""
 
     token: str = Field(min_length=1)
+
+
+class PasswordChangeRequest(BaseModel):
+    """``POST /auth/password/change`` body.
+
+    ``current_password`` has no shape validation — verification
+    against the stored hash is what proves possession. Validating
+    its shape here would be theatre.
+
+    ``new_password`` reuses the registration validator (8-72 bytes,
+    >=1 letter, >=1 digit). Future tightening (e.g. dictionary
+    blocklist) lives in ``validate_password_shape`` so register
+    and change stay in lockstep.
+    """
+
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _validate_new_password(cls, v: str) -> str:
+        return validate_password_shape(v)
 
 
 class ResendVerificationRequest(BaseModel):

@@ -35,7 +35,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from uuid import UUID
+
+from app.config import settings
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -51,6 +54,7 @@ from app.dependencies import (
     get_rate_limiter,
     get_real_ip,
     rate_limit,
+    require_jwt,
 )
 from app.models.identity import User
 from app.redis_client import get_redis
@@ -62,6 +66,7 @@ from app.schemas.api_keys import (
 from app.schemas.auth import (
     LoginRequest,
     LogoutRequest,
+    PasswordChangeRequest,
     RefreshRequest,
     RegisterRequest,
     ResendVerificationRequest,
@@ -77,6 +82,7 @@ from app.services.auth import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    hash_password,
     verify_password,
 )
 from app.services.email import EmailService, get_email_service
@@ -94,6 +100,7 @@ from app.services.token_revocation import (
     get_user_revoked_before,
     is_revoked,
     revoke,
+    set_user_revoked_before,
 )
 
 logger = logging.getLogger(__name__)
@@ -643,3 +650,101 @@ async def resend_verification(
             await db.commit()
 
     return _RESEND_OK
+
+
+# ---------------------------------------------------------------- password change (Task 2.X)
+
+
+_INVALID_CURRENT_PASSWORD = HTTPException(
+    status_code=status.HTTP_400_BAD_REQUEST,
+    detail="invalid_current_password",
+)
+
+
+@router.post("/password/change", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    body: PasswordChangeRequest,
+    request: Request,
+    identity: AuthIdentity = Depends(require_jwt),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+) -> Response:
+    """Change the authenticated user's password.
+
+    Auth: JWT only — API-key credentials rejected with 403 by
+    ``require_jwt``. Rationale: a leaked API key shouldn't be able
+    to lock the human user out of their own account by rotating
+    the password.
+
+    Failure-mode merge (per Task 2.X scope decision #2):
+      - Wrong current_password → 400 ``invalid_current_password``
+      - new_password matches current → 400 ``invalid_current_password``
+        (same body — leaking "your new password equals your current
+        one" is a weak signal we don't need to expose).
+
+    Side-effect ordering (per Task 2.X scope decision #3):
+      a. ALWAYS run ``verify_password`` for both current and new —
+         keeps timing uniform across all 400 paths and confirms
+         "new == current" via the existing hash without re-hashing.
+      b. If either check fails → 400, no DB change, no Redis write.
+      c. Hash the new password.
+      d. DB transaction: UPDATE user.hashed_password + audit row.
+      e. AFTER commit: ``set_user_revoked_before`` in Redis.
+
+    Why DB-before-Redis (not the inverse): if Redis fails AFTER
+    commit, the password is changed but old tokens still work for
+    up to refresh-TTL. Degraded but not catastrophic — user can
+    re-call the endpoint, which re-sets the Redis key. The inverse
+    (Redis set, DB failed) would reject valid old tokens for no
+    reason.
+    """
+    assert identity.user is not None  # require_jwt guarantees this
+    user = identity.user
+
+    # ALWAYS run verify_password — timing-stable across all 400 paths.
+    current_ok = verify_password(body.current_password, user.hashed_password)
+    new_matches_current = verify_password(
+        body.new_password, user.hashed_password
+    )
+
+    if not current_ok or new_matches_current:
+        raise _INVALID_CURRENT_PASSWORD
+
+    # Hash + persist + audit (one transaction).
+    new_hash = hash_password(body.new_password)
+    user.hashed_password = new_hash
+    await audit(
+        db,
+        organization_id=identity.organization_id,
+        actor_id=user.id,
+        action=AuthAction.PASSWORD_CHANGED,
+        resource_type="user",
+        resource_id=user.id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
+    await db.commit()
+
+    # AFTER commit: user-level revocation (Task 2.X infrastructure
+    # from commit 07d0189). Every token with iat < now is invalidated;
+    # TTL matches refresh-token expiry so the key auto-cleans when
+    # those tokens couldn't have been valid anyway.
+    now_ts = int(time.time())
+    ttl = settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 86_400
+    try:
+        await set_user_revoked_before(redis, user.id, now_ts, ttl_seconds=ttl)
+    except Exception as e:
+        # Degraded mode: password is changed but old tokens still work
+        # until natural expiry. Log loudly; user can re-call.
+        logger.error(
+            "set_user_revoked_before failed for user=%s after successful "
+            "password change: %s. Old tokens remain valid until natural "
+            "expiry. Retry the password-change request.",
+            user.id,
+            e,
+        )
+        # Don't raise — the password DID change successfully. Returning
+        # 5xx after a successful state mutation would mislead the
+        # client into thinking the change failed.
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
