@@ -42,9 +42,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import (
     AuthIdentity,
     get_db,
+    get_real_ip,
     require_org_membership,
 )
 from app.models.projects import Project
+from app.services.audit import ProjectAction, audit
 from app.schemas.projects import (
     PaginatedProjectsResponse,
     PaginationMeta,
@@ -104,6 +106,17 @@ async def create_project(
     )
     db.add(project)
     await db.flush()
+
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=identity.user.id if identity.user is not None else None,
+        action=ProjectAction.PROJECT_CREATED,
+        resource_type="project",
+        resource_id=project.id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
     await db.commit()
     await db.refresh(project)
 
@@ -200,6 +213,7 @@ async def patch_project(
     org_id: UUID,
     project_id: UUID,
     body: ProjectUpdateRequest,
+    request: Request,
     identity: AuthIdentity = Depends(require_org_membership()),
     db: AsyncSession = Depends(get_db),
 ):
@@ -227,6 +241,16 @@ async def patch_project(
     for field, value in update.items():
         setattr(project, field, value)
 
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=identity.user.id if identity.user is not None else None,
+        action=ProjectAction.PROJECT_UPDATED,
+        resource_type="project",
+        resource_id=project.id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
     await db.commit()
     await db.refresh(project)
     return ProjectResponse.model_validate(project)
@@ -239,6 +263,7 @@ async def patch_project(
 async def delete_project(
     org_id: UUID,
     project_id: UUID,
+    request: Request,
     identity: AuthIdentity = Depends(require_org_membership(jwt_only=True)),
     db: AsyncSession = Depends(get_db),
 ):
@@ -250,6 +275,16 @@ async def delete_project(
     if project.archived_at is not None:
         raise _GONE
     project.archived_at = datetime.now(timezone.utc)
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=identity.user.id if identity.user is not None else None,
+        action=ProjectAction.PROJECT_ARCHIVED,
+        resource_type="project",
+        resource_id=project.id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

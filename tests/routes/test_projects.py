@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from app.models.audit import AuditLog
 from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.projects import Project
 from app.services.auth import create_access_token, hash_password
@@ -622,3 +623,83 @@ async def test_require_org_membership_jwt_only_rejects_api_key(
     )
     assert r.status_code == 403
     assert r.json()["detail"] == "api_key_insufficient_for_operation"
+
+
+# =============================================================== back-fill audit (Task 3.2 Commit 1)
+
+
+@pytest.mark.asyncio
+async def test_create_project_writes_audit_project_created(
+    client, project_owner, db_session
+):
+    """Task 3.2 back-fill: POST /projects emits ProjectAction.PROJECT_CREATED."""
+    org, user, headers = project_owner
+    create = await client.post(
+        f"/v1/orgs/{org.id}/projects",
+        json=_create_payload(name="audited-create"),
+        headers=headers,
+    )
+    pid = UUID(create.json()["id"])
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "project.created")
+        )
+    ).scalars().all()
+    assert len(audits) == 1
+    assert audits[0].actor_id == user.id
+    assert audits[0].resource_type == "project"
+    assert audits[0].resource_id == pid
+
+
+@pytest.mark.asyncio
+async def test_patch_project_writes_audit_project_updated(
+    client, project_owner, db_session
+):
+    """Task 3.2 back-fill: PATCH /projects emits ProjectAction.PROJECT_UPDATED.
+    One row per PATCH (test runs a single PATCH and asserts exactly one
+    audit row of this kind)."""
+    org, user, headers = project_owner
+    create = await client.post(
+        f"/v1/orgs/{org.id}/projects",
+        json=_create_payload(name="audit-patch"),
+        headers=headers,
+    )
+    pid = UUID(create.json()["id"])
+    await client.patch(
+        f"/v1/orgs/{org.id}/projects/{pid}",
+        json={"name": "renamed"},
+        headers=headers,
+    )
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "project.updated")
+        )
+    ).scalars().all()
+    assert len(audits) == 1
+    assert audits[0].actor_id == user.id
+    assert audits[0].resource_id == pid
+
+
+@pytest.mark.asyncio
+async def test_delete_project_writes_audit_project_archived(
+    client, project_owner, db_session
+):
+    """Task 3.2 back-fill: DELETE /projects emits ProjectAction.PROJECT_ARCHIVED."""
+    org, user, headers = project_owner
+    create = await client.post(
+        f"/v1/orgs/{org.id}/projects",
+        json=_create_payload(name="audit-archive"),
+        headers=headers,
+    )
+    pid = UUID(create.json()["id"])
+    await client.delete(
+        f"/v1/orgs/{org.id}/projects/{pid}", headers=headers
+    )
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "project.archived")
+        )
+    ).scalars().all()
+    assert len(audits) == 1
+    assert audits[0].actor_id == user.id
+    assert audits[0].resource_id == pid

@@ -10,7 +10,13 @@ from sqlalchemy import select
 
 from app.models.audit import AuditLog
 from app.models.identity import Organization, User
-from app.services.audit import AuditDetails, AuthAction, audit
+from app.services.audit import (
+    ALL_ACTION_ENUMS,
+    AuditDetails,
+    AuthAction,
+    ProjectAction,
+    audit,
+)
 from tests.conftest import use_org
 
 
@@ -75,6 +81,77 @@ def test_auth_action_values_are_dotted_strings():
 def test_auth_action_values_are_unique():
     values = [a.value for a in AuthAction]
     assert len(values) == len(set(values))
+
+
+# ---------------------------------------------------------------- ProjectAction (Task 3.2 audit-split)
+
+
+def test_project_action_enum_covers_m31_and_m32_events():
+    """Pin the M3 events that are emitted today (Task 3.1 back-fill +
+    3.2 verification)."""
+    for name in (
+        "PROJECT_CREATED",
+        "PROJECT_UPDATED",
+        "PROJECT_ARCHIVED",
+        "PROJECT_DOMAIN_VERIFIED",
+        "PROJECT_DOMAIN_VERIFICATION_FAILED",
+    ):
+        assert hasattr(ProjectAction, name), f"missing {name}"
+
+
+def test_project_action_values_are_dotted_strings():
+    for action in ProjectAction:
+        assert "." in action.value, (
+            f"{action.name} must use dotted-string value; got {action.value!r}"
+        )
+    assert ProjectAction.PROJECT_DOMAIN_VERIFIED.value == "project.domain.verified"
+
+
+def test_action_enum_values_are_globally_disjoint():
+    """Load-bearing regression guard for the audit-enum split.
+
+    If this test fails: a string value is duplicated across two
+    action enums (e.g. AuthAction.X.value == ProjectAction.Y.value).
+    The audit_logs.action column accepts strings from any enum, so
+    a duplicate value would make queries ambiguous about which
+    domain the event belongs to.
+
+    Auto-grows: ALL_ACTION_ENUMS in src/app/services/audit.py is
+    the single registry. Adding a new enum (e.g. ScanAction) plus
+    appending it to ALL_ACTION_ENUMS extends this test's coverage
+    automatically.
+    """
+    all_values: list[str] = []
+    for enum_class in ALL_ACTION_ENUMS:
+        all_values.extend(e.value for e in enum_class)
+    duplicates = [v for v in set(all_values) if all_values.count(v) > 1]
+    assert not duplicates, (
+        f"Action enum values must be globally unique across "
+        f"{[c.__name__ for c in ALL_ACTION_ENUMS]}; duplicates: {duplicates}"
+    )
+
+
+def test_action_enum_registry_lists_all_known_enums():
+    """ALL_ACTION_ENUMS must contain every action enum defined in
+    audit.py. Catches a future engineer adding a new enum but
+    forgetting to register it (which would silently bypass the
+    disjointness check)."""
+    from app.services import audit as audit_module
+    from enum import Enum as _Enum
+
+    declared_enums = {
+        obj
+        for name, obj in vars(audit_module).items()
+        if isinstance(obj, type)
+        and issubclass(obj, _Enum)
+        and name.endswith("Action")
+    }
+    registered = set(ALL_ACTION_ENUMS)
+    missing = declared_enums - registered
+    assert not missing, (
+        f"action enums declared but NOT in ALL_ACTION_ENUMS: "
+        f"{[e.__name__ for e in missing]} — add them to the registry"
+    )
 
 
 # ---------------------------------------------------------------- audit()

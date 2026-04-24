@@ -33,15 +33,23 @@ from app.models.audit import AuditLog
 
 
 class AuthAction(str, PyEnum):
-    """Canonical identifiers for auth-event audit rows.
+    """Canonical identifiers for auth-domain audit rows.
 
     Dotted-string values are stable API — log consumers and SIEM
     queries depend on the exact string. Renaming a value is a
     breaking change to the audit contract.
 
+    Per-domain enum split (Task 3.2): ``AuthAction`` carries auth
+    events; ``ProjectAction`` (below) carries project events. Future
+    domains (scans, findings, credentials) get their own enums.
+    The single ``audit_logs.action`` column accepts strings from any
+    enum; the enum-side guard is for typo prevention. Disjointness
+    of string values across enums is regression-tested
+    (``test_action_enum_values_are_globally_disjoint``).
+
     Values in the ``# === reserved ===`` block are not yet emitted
     by any endpoint but are declared here so the schema does not
-    churn as each M2 endpoint lands.
+    churn as each endpoint lands.
     """
 
     # === emitted in M2.3 ===
@@ -61,6 +69,38 @@ class AuthAction(str, PyEnum):
     PASSWORD_RESET_COMPLETED = "auth.password.reset.completed"
     API_KEY_CREATED = "auth.api_key.created"
     API_KEY_REVOKED = "auth.api_key.revoked"
+
+
+class ProjectAction(str, PyEnum):
+    """Project-domain audit events. Split from ``AuthAction`` at
+    Task 3.2 to prevent the auth enum from becoming a sprawling
+    catch-all (see DRIFT-LOG 2026-04-23 audit-enum-split entry).
+
+    Same dotted-string contract as AuthAction. Disjoint from
+    AuthAction's values — pinned by
+    ``test_action_enum_values_are_globally_disjoint``.
+
+    Reserved values are declared early to prevent schema churn as
+    later M3 sub-tasks land their endpoints (project credentials,
+    stats endpoints, etc.).
+    """
+
+    # === emitted starting in Task 3.1 (back-fill) + 3.2 ===
+    PROJECT_CREATED = "project.created"
+    PROJECT_UPDATED = "project.updated"
+    PROJECT_ARCHIVED = "project.archived"
+    PROJECT_DOMAIN_VERIFIED = "project.domain.verified"
+    PROJECT_DOMAIN_VERIFICATION_FAILED = "project.domain.verification_failed"
+
+    # === reserved — declared here to freeze values for later 3.x ===
+    PROJECT_CREDENTIAL_SET = "project.credential.set"
+    PROJECT_CREDENTIAL_DELETED = "project.credential.deleted"
+
+
+# Registry of all action-enum classes. Add new enums here as they
+# land (ScanAction, FindingAction, etc.) so the global-disjointness
+# test auto-covers them without manual updates.
+ALL_ACTION_ENUMS: tuple[type[PyEnum], ...] = (AuthAction, ProjectAction)
 
 
 class AuditDetails(TypedDict, total=False):
@@ -89,7 +129,7 @@ async def audit(
     *,
     organization_id: UUID,
     actor_id: UUID | None,
-    action: AuthAction,
+    action: AuthAction | ProjectAction,
     resource_type: str,
     resource_id: UUID | None = None,
     ip_address: str | None = None,
