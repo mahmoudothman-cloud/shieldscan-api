@@ -91,6 +91,8 @@ class ProjectAction(str, PyEnum):
     PROJECT_ARCHIVED = "project.archived"
     PROJECT_DOMAIN_VERIFIED = "project.domain.verified"
     PROJECT_DOMAIN_VERIFICATION_FAILED = "project.domain.verification_failed"
+    # === emitted starting in Task 3.3 ===
+    PROJECT_MOBILE_UPLOADED = "project.mobile.uploaded"
 
     # === reserved — declared here to freeze values for later 3.x ===
     PROJECT_CREDENTIAL_SET = "project.credential.set"
@@ -122,6 +124,8 @@ class AuditDetails(TypedDict, total=False):
     api_key_prefix: str
     token_jti: str
     method: str  # e.g. "email", "sms" — channel for verification/reset actions
+    platform: str  # e.g. "android", "ios" — mobile-upload events
+    size_bytes: int  # bytes of the uploaded artifact (mobile uploads)
 
 
 async def audit(

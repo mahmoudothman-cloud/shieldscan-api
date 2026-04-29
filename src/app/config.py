@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     FERNET_KEY: str
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "https://app.shieldscan.io"]
     ENVIRONMENT: str = "development"
+    # Hard cap on a single mobile-upload (.apk / .ipa) body size, in MB.
+    # Enforced at the route handler before the body is read (via
+    # Content-Length pre-check) and again after read for clients that
+    # don't send Content-Length. Task 3.3.
+    MOBILE_UPLOAD_HARD_LIMIT_MB: int = 500
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
