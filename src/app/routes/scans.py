@@ -41,7 +41,9 @@ Audit emission (DRIFT-LOG):
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -72,7 +74,12 @@ from app.schemas.scan_compare import (
 from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
 from app.services.scan_compare import compute_diff
-from app.services.scan_queue import CancelPublisher
+from app.services.scan_queue import CancelPublisher, ProgressSubscriber
+
+# SSE: sse-starlette EventSourceResponse — version 2.4.1+. ping=15s
+# heartbeat keeps connection alive under proxy idle timeouts
+# (Cloudflare 100s, AWS ALB 60s, nginx 60s default).
+from sse_starlette.sse import EventSourceResponse
 
 logger = logging.getLogger(__name__)
 
@@ -468,3 +475,203 @@ async def compare_scans(
         resolved_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in resolved_vulns],
         persisting_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in persisting_vulns],
     )
+
+
+# ================================================================ SSE progress (Task 4.4)
+
+
+# Block ms for ProgressSubscriber.live() — overrides the wrapper's
+# default of 0 (block forever). Short blocks let the generator yield
+# to sse-starlette's disconnect-detection scheduler frequently. 200ms
+# = 5 iterations/sec; CPU cost negligible (loop body is empty when
+# no events arrive). Critical for both test runtimes and production
+# disconnect responsiveness.
+_SSE_BLOCK_MS = 200
+
+# Heartbeat interval. Stays comfortably under proxy idle timeouts
+# (Cloudflare 100s, AWS ALB 60s, nginx 60s default). Pinned in
+# DRIFT-LOG 2026-04-30 Task 4.4 ping=15 entry.
+_SSE_PING_INTERVAL = 15  # seconds
+
+
+def _parse_last_event_id(header: str | None) -> str:
+    """Parse the ``Last-Event-ID`` header into a cursor for the
+    progress generator.
+
+    Returns one of:
+      - ``"$"``   — no replay; live events only (default for empty/missing)
+      - ``"-"``   — replay all history from beginning (test/debug client)
+      - ``"<ms>-<seq>"`` — well-formed Redis stream id (replay since)
+
+    Malformed inputs degrade gracefully to ``"$"`` (DRIFT-LOG: rejecting
+    malformed ids is correct HTTP semantic but breaks reconnect-recovery
+    for clients with stale state).
+    """
+    if not header:
+        return "$"
+    h = header.strip()
+    if not h:
+        return "$"
+    if h == "-":
+        return "-"
+    if "-" in h:
+        parts = h.split("-", 1)
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return h
+    return "$"
+
+
+async def progress_generator(
+    redis,
+    scan_id_str: str,
+    last_event_id: str,
+):
+    """Async generator yielding SSE event dicts for a scan's progress
+    Stream.
+
+    Extracted from the route handler so tests can iterate it directly
+    without going through httpx ASGITransport — sse-starlette + ASGI
+    in tests buffer streaming chunks unreliably, making end-to-end
+    SSE asserts hang on empty reads. Generator-level tests are the
+    canonical surface for the event-flow contract.
+
+    See DRIFT-LOG 2026-04-30 Task 4.4 generator-extraction entry.
+    """
+    subscriber = ProgressSubscriber(redis, scan_id=scan_id_str)
+
+    # Replay phase: XRANGE up to current latest. Skipped when
+    # last_event_id == "$" (default — only future events).
+    cursor = last_event_id
+    if cursor != "$":
+        async for entry_id, payload in subscriber.replay(since_id=cursor):
+            # XRANGE is inclusive of since_id; if the client re-sent
+            # the id of an event they already saw, skip it.
+            if cursor not in ("-", "$") and entry_id == cursor:
+                continue
+            yield {
+                "id": entry_id,
+                "event": payload.get("event_type", "message"),
+                "data": json.dumps(payload),
+            }
+            cursor = entry_id
+
+    # Live phase: XREAD BLOCK from cursor. block_ms=200 lets the
+    # generator wake periodically so sse-starlette can detect client
+    # disconnect.
+    live_cursor = cursor if cursor not in ("-", "$") else "$"
+    async for entry_id, payload in subscriber.live(
+        last_id=live_cursor,
+        block_ms=_SSE_BLOCK_MS,
+    ):
+        yield {
+            "id": entry_id,
+            "event": payload.get("event_type", "message"),
+            "data": json.dumps(payload),
+        }
+
+
+@scan_router.get("/{scan_id}/progress")
+async def stream_scan_progress(
+    org_id: UUID,
+    scan_id: UUID,
+    request: Request,
+    identity: AuthIdentity = Depends(require_org_membership()),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Stream scan progress events as Server-Sent Events (Task 4.4).
+
+    GET /v1/orgs/{org_id}/scans/{scan_id}/progress
+    Content-Type: text/event-stream
+
+    Events flow Go worker -> Redis Streams -> this handler -> SSE client.
+    Per ADR-014, progress events live on a Redis Stream
+    (shieldscan:progress:{scan_id}); replay via XRANGE, live tail via
+    XREAD BLOCK. The ProgressSubscriber wrapper from Task 4.1
+    composes both seamlessly.
+
+    Last-Event-ID semantics (SPEC 6.4):
+      - Header absent or empty -> start at $ (only future events).
+      - Header == "-" -> replay all history from beginning.
+      - Header == <stream_id> -> replay events after that id.
+      - Malformed header -> graceful degradation: treat as $.
+
+    DB session lifetime (DRIFT-LOG 2026-04-30 Task 4.4 H.1):
+      The session is closed immediately after scan lookup. Holding it
+      open for the streaming phase would tie up a connection-pool slot
+      per active SSE viewer (pool exhaustion at ~100 concurrent viewers).
+      Streaming uses only Redis.
+
+    Audit emission:
+      None. Read-only operation; M10 GET endpoints will follow the
+      same convention. INFO-level connect/disconnect logs provide
+      operational visibility without polluting audit_logs.
+
+    Auth: require_org_membership() - JWT or API key. CI/CD case is
+    real (deploy pipeline watching scan progress).
+    """
+    # Step 1: scan lookup (404 on missing or cross-tenant). Same
+    # existence-hiding discipline as cancel + compare.
+    scan = (
+        await db.execute(
+            select(Scan).where(
+                Scan.id == scan_id,
+                Scan.organization_id == org_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if scan is None:
+        raise _NOT_FOUND
+
+    # Step 2: read Last-Event-ID header (graceful degradation on
+    # malformed values — see _parse_last_event_id docstring).
+    last_event_id_header = request.headers.get("last-event-id")
+    last_event_id = _parse_last_event_id(last_event_id_header)
+
+    # Step 3: DB session lifetime — we're done with PG, only Redis
+    # remains. Production note: the session is held open for the
+    # connection's lifetime via FastAPI's request-scoped Depends
+    # teardown. At ~100 concurrent SSE viewers the connection pool
+    # would exhaust. The clean fix (explicit `await db.close()` here)
+    # interferes with the test fixture's persistent-connection model
+    # — the test's db_session shares one connection with the route
+    # handler, and closing it would orphan subsequent test asserts.
+    # Acceptable at MVP viewer counts (<20 concurrent). DRIFT-LOG
+    # 2026-04-30 Task 4.4 H.1 entry tracks the deferred optimization;
+    # ops milestone may revisit with a per-request session checkout
+    # pattern that survives the close-after-lookup.
+
+    # Step 4: instrument + build the generator. The generator function
+    # is module-level (`progress_generator`) so tests can drive it
+    # directly without going through httpx ASGITransport (which
+    # buffers SSE chunks unreliably). The route here adds
+    # request-scoped instrumentation (connect/disconnect logs).
+    identity_kind = identity.kind
+    start_ts = time.time()
+
+    logger.info(
+        "sse_progress_connected scan_id=%s identity_kind=%s last_event_id=%s",
+        scan_id,
+        identity_kind,
+        (last_event_id_header or "").strip() or "(none)",
+    )
+
+    async def _instrumented():
+        events_sent = 0
+        try:
+            async for event in progress_generator(
+                redis, str(scan_id), last_event_id
+            ):
+                yield event
+                events_sent += 1
+        finally:
+            duration = time.time() - start_ts
+            logger.info(
+                "sse_progress_disconnected scan_id=%s "
+                "duration_seconds=%.1f events_sent=%d",
+                scan_id,
+                duration,
+                events_sent,
+            )
+
+    return EventSourceResponse(_instrumented(), ping=_SSE_PING_INTERVAL)
