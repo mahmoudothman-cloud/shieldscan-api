@@ -337,3 +337,70 @@ async def test_consumer_does_not_audit_per_job(scan_with_jobs, fake_redis, sessi
         ).scalars().all()
         assert len(scan_audits) == 1
         assert scan_audits[0].action == "scan.completed"
+
+
+# ---------------------------------------------------------------- 14b. cancel-wins race (Task 4.5)
+
+
+@pytest.mark.asyncio
+async def test_consumer_does_not_overwrite_canceled_scan(
+    scan_with_jobs, fake_redis, session_factory
+):
+    """Cancel-wins regression guard (Task 4.5 H.2 reversal).
+
+    Setup: cancel the scan via direct DB write (simulating the cancel
+    endpoint), then drive completion events for the remaining jobs.
+    Verify: Scan.status stays CANCELED — completion events do NOT
+    overwrite scan-level state. User intent wins at scan-level
+    aggregation.
+
+    REGRESSION GUARD: a future "helpful" change that drops CANCELED
+    from the consumer's terminal-state short-circuit set would let
+    completion events overwrite CANCELED → COMPLETED/PARTIAL. This
+    test breaks immediately. See DRIFT-LOG 2026-04-30 Task 4.5
+    cancel-wins entry + ADR-013.
+    """
+    s = scan_with_jobs
+
+    # Cancel the scan at scan-level (simulates the 4.5 cancel endpoint).
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        scan_row = (
+            await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
+        ).scalar_one()
+        scan_row.status = ScanStatus.CANCELED
+        await fresh.commit()
+
+    # Now drive completion events for all 3 jobs. The consumer should
+    # update job-level rows but NOT overwrite scan-level CANCELED state.
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    for job in s["jobs"]:
+        await consumer._handle(_completion_event(job))
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        final = (
+            await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
+        ).scalar_one()
+        assert final.status == ScanStatus.CANCELED, (
+            f"cancel must win: completion events arriving after a "
+            f"scan-level cancel must not overwrite CANCELED state; "
+            f"got {final.status!r}"
+        )
+
+        # No SCAN_COMPLETED audit should have been emitted.
+        scan_audits = (
+            await fresh.execute(
+                select(AuditLog).where(
+                    AuditLog.action.in_(["scan.completed", "scan.failed"])
+                )
+            )
+        ).scalars().all()
+        assert scan_audits == [], (
+            "consumer must NOT emit scan-level audit when scan is "
+            "already terminal (CANCELED in this case)"
+        )

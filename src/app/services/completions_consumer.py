@@ -242,9 +242,21 @@ class CompletionsConsumer:
         ).scalar_one_or_none()
         if scan is None:
             return  # extremely unlikely; scan deleted concurrently
-        if scan.status in {ScanStatus.COMPLETED, ScanStatus.PARTIAL, ScanStatus.FAILED}:
-            # Already aggregated by a peer worker process — see DRIFT-LOG
-            # H.4 multi-process double-UPDATE entry. Don't re-emit audit.
+        if scan.status in {
+            ScanStatus.COMPLETED,
+            ScanStatus.PARTIAL,
+            ScanStatus.FAILED,
+            # CANCELED added in Task 4.5 H.2 (cancel-wins). User intent
+            # at scan-level is sticky: if the cancel endpoint set
+            # CANCELED before this completion landed, we do NOT
+            # overwrite. Job-level state still reflects what each
+            # worker reported (some completed, some canceled). See
+            # DRIFT-LOG 2026-04-30 Task 4.5 cancel-wins entry.
+            ScanStatus.CANCELED,
+        }:
+            # Already terminal — don't re-aggregate, don't re-emit audit.
+            # Covers: peer worker process aggregated (4.2 H.4), or user
+            # canceled before completion landed (4.5 H.2).
             return
 
         if all_ok:

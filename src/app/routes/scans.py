@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,13 +63,27 @@ from app.schemas.scans import (
     ScanJobSummary,
     ScanResponse,
 )
+from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
+from app.services.scan_queue import CancelPublisher
 
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(
+# Project-scoped router — Task 4.3 (POST /scans, future GET /scans).
+# Lives under /orgs/{org_id}/projects/{project_id}/scans.
+project_scans_router = APIRouter(
     prefix="/orgs/{org_id}/projects/{project_id}/scans",
+    tags=["scans"],
+)
+
+# Scan-id-scoped router — Task 4.5 (DELETE cancel) + future M4 + M10
+# operations (GET single, GET progress SSE, GET jobs, attack-surface).
+# Lives under /orgs/{org_id}/scans/{scan_id}/...
+# Two routers in one file matches the routes/projects.py precedent
+# (CRUD + nested verify + credentials all in one router file).
+scan_router = APIRouter(
+    prefix="/orgs/{org_id}/scans",
     tags=["scans"],
 )
 
@@ -78,6 +92,26 @@ _NOT_FOUND = HTTPException(status_code=404, detail="not_found")
 _DOMAIN_NOT_VERIFIED = HTTPException(
     status_code=403, detail="domain_not_verified"
 )
+_SCAN_ALREADY_TERMINAL = HTTPException(
+    status_code=409, detail="scan_already_terminal"
+)
+
+
+# Active scan states — cancel is meaningful.
+_ACTIVE_STATES: frozenset[ScanStatus] = frozenset({
+    ScanStatus.QUEUED,
+    ScanStatus.RECONNING,
+    ScanStatus.RUNNING,
+    ScanStatus.ANALYZING,
+})
+
+# Terminal-final states — cancel is a no-op past these (the work
+# already concluded, not by user intent). 409 to signal the conflict.
+_TERMINAL_FINAL: frozenset[ScanStatus] = frozenset({
+    ScanStatus.COMPLETED,
+    ScanStatus.PARTIAL,
+    ScanStatus.FAILED,
+})
 
 # Scan types that bypass the domain-verified gate. Mobile = uploaded
 # artifact is the bound asset. Container = image is the bound asset.
@@ -88,7 +122,7 @@ _DOMAIN_VERIFY_BYPASS: frozenset[ScanType] = frozenset(
 )
 
 
-@router.post(
+@project_scans_router.post(
     "",
     status_code=status.HTTP_201_CREATED,
     response_model=ScanResponse,
@@ -186,3 +220,111 @@ async def create_scan(
         created_at=scan.created_at,
         jobs=[ScanJobSummary.model_validate(j) for j in jobs],
     )
+
+
+# ================================================================ scan_router endpoints (Task 4.5+)
+
+
+@scan_router.delete(
+    "/{scan_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def cancel_scan(
+    org_id: UUID,
+    scan_id: UUID,
+    request: Request,
+    identity: AuthIdentity = Depends(require_org_membership()),
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
+):
+    """Cancel an active scan (Task 4.5).
+
+    State transitions:
+      Active states (queued/reconning/running/analyzing) → CANCELED.
+      Already-CANCELED → no-op state-wise, but emit a fresh audit row
+        (event-not-state-change discipline; same as Task 3.2 reverify
+        pin). 204 either way.
+      Terminal-final (completed/partial/failed) → 409
+        scan_already_terminal. The work concluded; cancel is
+        semantically meaningless.
+
+    Cancel-vs-completion race (DRIFT-LOG H.2 reversal): scan-level
+    state is sticky. The completions consumer's
+    ``_maybe_complete_scan`` short-circuits on CANCELED so a
+    completion event arriving after this cancel does NOT overwrite
+    the terminal CANCELED state. Cancel wins at scan-level
+    aggregation (job-level cancel is M5+ worker-defined).
+
+    Auth: ``require_org_membership()`` — JWT or API key. Any-member
+    (no admin gate) — symmetric with scan-create (Task 4.3).
+
+    Same-tx + commit-then-publish ordering (matches Task 4.2 +
+    Task 4.3): UPDATE Scan.status + emit audit + COMMIT, then
+    PUBLISH cancel signal to Redis. Pub/Sub publish is fire-and-
+    forget; failure post-commit is acceptable per visible-failure
+    discipline (the scan is canceled in PG either way).
+
+    Worker-side cancel consumption is M5+ work — until then, the
+    cancel signal goes into the void. See DRIFT-LOG 2026-04-30
+    Task 4.5 worker-side-cancel entry.
+    """
+    scan = (
+        await db.execute(
+            select(Scan).where(
+                Scan.id == scan_id,
+                Scan.organization_id == org_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if scan is None:
+        raise _NOT_FOUND
+
+    # Terminal-final guard. Idempotent CANCELED falls through to the
+    # state transition + audit emission below (no-op write, fresh audit).
+    if scan.status in _TERMINAL_FINAL:
+        raise _SCAN_ALREADY_TERMINAL
+
+    previous_status = scan.status
+    scan.status = ScanStatus.CANCELED  # no-op if already CANCELED
+
+    actor_id = identity.user.id if identity.user is not None else None
+    details: dict = {
+        "scan_type": scan.scan_type.value,
+        "previous_status": previous_status.value,
+        "reason": "user_requested",
+    }
+    if identity.api_key is not None:
+        details["api_key_prefix"] = identity.api_key.key_prefix
+
+    await audit(
+        db,
+        organization_id=scan.organization_id,
+        actor_id=actor_id,
+        action=ScanAction.SCAN_CANCELED,
+        resource_type="scan",
+        resource_id=scan.id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+        details=details,  # type: ignore[arg-type]
+    )
+    await db.commit()
+
+    # Publish cancel signal to Redis. Fire-and-forget; if this fails
+    # post-commit, the scan is canceled in PG (visible to user) but
+    # in-flight Go workers (M5+) won't receive the abort. Until M5
+    # ships the worker-side subscriber, this signal goes into the
+    # void anyway — see DRIFT-LOG.
+    cancel_publisher = CancelPublisher(redis)
+    try:
+        await cancel_publisher.publish_cancel(
+            str(scan_id), reason="user_requested"
+        )
+    except Exception:
+        logger.exception(
+            "cancel publish failed for scan_id=%s; PG state already "
+            "CANCELED, will surface as ghost-canceled if workers running",
+            scan_id,
+        )
+        # Don't raise — state is durable in PG; visible-failure mode.
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
