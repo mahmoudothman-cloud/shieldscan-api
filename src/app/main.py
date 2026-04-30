@@ -33,6 +33,7 @@ from app.routes import api_keys as api_keys_routes
 from app.routes import auth as auth_routes
 from app.routes import mobile as mobile_routes
 from app.routes import projects as projects_routes
+from app.routes import scans as scans_routes
 from app.services.completions_consumer import CompletionsConsumer
 
 logger = logging.getLogger(__name__)
@@ -126,3 +127,4 @@ app.include_router(auth_routes.router, prefix="/v1")
 app.include_router(api_keys_routes.router, prefix="/v1")
 app.include_router(projects_routes.router, prefix="/v1")
 app.include_router(mobile_routes.router, prefix="/v1")
+app.include_router(scans_routes.router, prefix="/v1")
