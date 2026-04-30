@@ -39,6 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import select_fresh
 from app.dependencies import (
     AuthIdentity,
     check_rate_limits,
@@ -537,18 +538,16 @@ async def patch_project_credentials(
     )
     await db.commit()
 
-    # ``populate_existing=True`` forces SQLAlchemy to re-hydrate the
-    # ORM object from the SELECT result rather than returning a stale
-    # row from the session identity map. Required because the test
-    # fixture binds AsyncSession with ``expire_on_commit=False`` (the
-    # GUC must survive commits) — without populate_existing, a second
-    # PATCH on the same project sees the first PATCH's cached row.
+    # ``select_fresh`` bypasses the session identity-map cache so a
+    # second PATCH on the same project sees the freshly-UPSERTed row
+    # rather than the first PATCH's cached snapshot. See
+    # ``app.db.select_fresh`` + DEVELOPMENT-PATTERNS.md for context.
     cred = (
-        await db.execute(
+        await select_fresh(
+            db,
             select(ProjectCredential).where(
                 ProjectCredential.project_id == project_id
             ),
-            execution_options={"populate_existing": True},
         )
     ).scalar_one()
 
