@@ -47,8 +47,14 @@ from app.dependencies import (
     get_real_ip,
     require_org_membership,
 )
-from app.models.projects import Project
+from app.models.identity import MembershipRole
+from app.models.projects import Project, ProjectCredential
+from app.schemas.credentials import (
+    CredentialRequest,
+    CredentialResponse,
+)
 from app.services.audit import ProjectAction, audit
+from app.services.credentials import encrypt_credential
 from app.schemas.projects import (
     PaginatedProjectsResponse,
     PaginationMeta,
@@ -83,6 +89,35 @@ _GONE = HTTPException(
     status_code=status.HTTP_410_GONE,
     detail="project_already_archived",
 )
+_INSUFFICIENT_ROLE = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN,
+    detail="insufficient_role",
+)
+_PROJECT_ARCHIVED_CONFLICT = HTTPException(
+    status_code=status.HTTP_409_CONFLICT,
+    detail="project_archived",
+)
+
+
+# ---------------------------------------------------------------- admin-or-api-key dep (Task 3.X)
+
+
+async def require_admin_or_api_key(
+    identity: AuthIdentity = Depends(require_org_membership()),
+) -> AuthIdentity:
+    """Wrap ``require_org_membership`` with an admin role check that
+    only applies to JWT callers.
+
+    API-key callers bypass the role check: API keys are admin-equivalent
+    at creation time (Task 2.4 requires admin JWT to mint a key), so
+    any authenticated API-key call is by-construction privileged.
+    Reusable for future admin-or-api-key endpoints.
+    """
+    if identity.kind == "api_key":
+        return identity
+    if identity.role != MembershipRole.ADMIN:
+        raise _INSUFFICIENT_ROLE
+    return identity
 
 
 # ---------------------------------------------------------------- create
@@ -421,3 +456,156 @@ async def verify_domain(
             expected_record=result.expected_record or "",
         ).model_dump(),
     )
+
+
+# ---------------------------------------------------------------- credentials (Task 3.X)
+
+
+@router.patch(
+    "/{project_id}/credentials",
+    response_model=CredentialResponse,
+)
+async def patch_project_credentials(
+    org_id: UUID,
+    project_id: UUID,
+    body: CredentialRequest,
+    request: Request,
+    identity: AuthIdentity = Depends(require_admin_or_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set or replace the project's auth credential.
+
+    Replace-in-place semantics: each call fully replaces any existing
+    credential for the project. Type changes (basic → bearer) work
+    naturally — the auth_type column updates and a fresh
+    ``encrypted_data`` blob is written.
+
+    Atomicity: uses PostgreSQL UPSERT
+    (``INSERT ... ON CONFLICT (project_id) DO UPDATE``) to avoid the
+    SELECT-then-INSERT-or-UPDATE race window. The
+    ``uq_project_credentials_project_id`` constraint
+    (migration ``d4f6b1e9a527``) is the conflict target.
+
+    Audit ``project.credential.set``. ``details`` carries
+    ``auth_type`` only — never field names or values.
+
+    Archived project → 409 ``project_archived``.
+    """
+    project = await _load_project(db, org_id, project_id)
+    if project is None:
+        raise _NOT_FOUND
+    if project.archived_at is not None:
+        raise _PROJECT_ARCHIVED_CONFLICT
+
+    # Encrypt only the secret fields — auth_type lives in its own
+    # column. Pydantic discriminator already stripped any extras
+    # (extra="forbid" on each variant).
+    payload = body.model_dump(mode="json", exclude={"auth_type"})
+    blob = encrypt_credential(payload)
+
+    # Atomic UPSERT — no SELECT-then-WRITE race window.
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    stmt = pg_insert(ProjectCredential).values(
+        project_id=project_id,
+        organization_id=org_id,
+        auth_type=body.auth_type,
+        encrypted_data=blob,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["project_id"],
+        set_={
+            "auth_type": body.auth_type,
+            "encrypted_data": blob,
+            "updated_at": datetime.now(timezone.utc),
+        },
+    )
+    await db.execute(stmt)
+
+    actor_id = identity.user.id if identity.user is not None else None
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=actor_id,
+        action=ProjectAction.PROJECT_CREDENTIAL_SET,
+        resource_type="project",
+        resource_id=project_id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+        # NEVER include field names or values — auth_type only.
+        details={"auth_type": body.auth_type},  # type: ignore[typeddict-unknown-key]
+    )
+    await db.commit()
+
+    # ``populate_existing=True`` forces SQLAlchemy to re-hydrate the
+    # ORM object from the SELECT result rather than returning a stale
+    # row from the session identity map. Required because the test
+    # fixture binds AsyncSession with ``expire_on_commit=False`` (the
+    # GUC must survive commits) — without populate_existing, a second
+    # PATCH on the same project sees the first PATCH's cached row.
+    cred = (
+        await db.execute(
+            select(ProjectCredential).where(
+                ProjectCredential.project_id == project_id
+            ),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+
+    return CredentialResponse(
+        auth_type=cred.auth_type,
+        configured=True,
+        updated_at=cred.updated_at,
+    )
+
+
+@router.delete(
+    "/{project_id}/credentials",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_project_credentials(
+    org_id: UUID,
+    project_id: UUID,
+    request: Request,
+    identity: AuthIdentity = Depends(require_admin_or_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clear the project's credential. 204 on success, even if no
+    credential existed (idempotent). Archived project → 409.
+
+    Audit ``project.credential.deleted`` is emitted only when a row
+    was actually removed — calling DELETE on a project with no
+    credential is a no-op and skips the audit row (matches the
+    audit discipline of "events for things that happened").
+    """
+    project = await _load_project(db, org_id, project_id)
+    if project is None:
+        raise _NOT_FOUND
+    if project.archived_at is not None:
+        raise _PROJECT_ARCHIVED_CONFLICT
+
+    cred = (
+        await db.execute(
+            select(ProjectCredential).where(
+                ProjectCredential.project_id == project_id
+            )
+        )
+    ).scalar_one_or_none()
+    if cred is None:
+        # Nothing to delete — return 204 without an audit row.
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    await db.delete(cred)
+    actor_id = identity.user.id if identity.user is not None else None
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=actor_id,
+        action=ProjectAction.PROJECT_CREDENTIAL_DELETED,
+        resource_type="project",
+        resource_id=project_id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+    )
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

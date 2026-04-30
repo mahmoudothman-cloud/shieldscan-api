@@ -93,8 +93,7 @@ class ProjectAction(str, PyEnum):
     PROJECT_DOMAIN_VERIFICATION_FAILED = "project.domain.verification_failed"
     # === emitted starting in Task 3.3 ===
     PROJECT_MOBILE_UPLOADED = "project.mobile.uploaded"
-
-    # === reserved — declared here to freeze values for later 3.x ===
+    # === emitted starting in Task 3.X ===
     PROJECT_CREDENTIAL_SET = "project.credential.set"
     PROJECT_CREDENTIAL_DELETED = "project.credential.deleted"
 

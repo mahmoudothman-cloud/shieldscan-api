@@ -62,7 +62,15 @@ os.environ.setdefault("R2_ACCESS_KEY", "dummy")
 os.environ.setdefault("R2_SECRET_KEY", "dummy")
 os.environ.setdefault("R2_BUCKET", "shieldscan-test")
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-key-at-least-32-bytes-xxxxxxx")
-os.environ.setdefault("FERNET_KEY", "test-fernet-key-base64-urlsafe-44-bytes=")
+# A real, valid Fernet key (base64-urlsafe 32 bytes). The previous
+# placeholder string was NOT a valid Fernet key and would crash any
+# code path that actually instantiated Fernet (Task 3.X surfaced this).
+# Stable across test runs so encrypted-blob byte assertions are
+# deterministic.
+os.environ.setdefault(
+    "FERNET_KEY",
+    "c2hpZWxkc2Nhbi10ZXN0LWZlcm5ldC1rZXktMzJieSE=",
+)
 
 TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 

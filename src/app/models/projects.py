@@ -44,9 +44,13 @@ class ProjectCredential(Base, TimestampMixin, TenantMixin):
         PgUUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
+        # UNIQUE: exactly one credential per project. M1 missed this;
+        # added in Task 3.X migration d4f6b1e9a527 to enable UPSERT
+        # replace-in-place semantics (PATCH /credentials).
+        unique=True,
     )
-    # cookie | bearer | basic | form | custom_header
+    # See app.services.credentials.AuthType for the canonical enum
+    # (Task 3.X lifted M1's inline comment into a proper enum).
     auth_type: Mapped[str] = mapped_column(String(50), nullable=False)
     # Fernet-encrypted blob (ciphertext is bytes)
     encrypted_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

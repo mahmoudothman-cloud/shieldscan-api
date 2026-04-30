@@ -40,7 +40,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
-from app.models.identity import APIKey, User
+from app.models.identity import APIKey, MembershipRole, User
 from app.redis_client import get_redis
 from app.services.auth import (
     TokenError,
@@ -307,6 +307,11 @@ class AuthIdentity:
     organization_id: UUID
     user: User | None = None
     api_key: APIKey | None = None
+    # Membership role for the JWT path. None for API-key path —
+    # API keys are admin-equivalent at creation time (Task 2.4),
+    # so role-gated endpoints (Task 3.X PATCH /credentials) treat
+    # any authenticated API key as authorized without checking role.
+    role: MembershipRole | None = None
 
 
 # last_used_at update is fire-and-forget (latency-sensitive auth path)
@@ -490,18 +495,19 @@ async def get_auth_identity(
     from app.models.identity import Membership
 
     result = await db.execute(
-        select(Membership.organization_id)
+        select(Membership.organization_id, Membership.role)
         .where(Membership.user_id == user.id)
         .limit(1)
     )
-    org_id = result.scalar_one_or_none()
-    if org_id is None:
+    row = result.first()
+    if row is None:
         # A user with zero memberships can't authenticate against any
         # tenant-scoped endpoint. Treat as 401 (same as user-deleted).
         raise _UNAUTHORIZED
+    org_id, role = row
     await db.execute(text(f"SET app.current_org_id = '{org_id}'"))
 
-    return AuthIdentity(kind="jwt", organization_id=org_id, user=user)
+    return AuthIdentity(kind="jwt", organization_id=org_id, user=user, role=role)
 
 
 async def require_jwt(
