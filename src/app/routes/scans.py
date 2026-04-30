@@ -63,8 +63,15 @@ from app.schemas.scans import (
     ScanJobSummary,
     ScanResponse,
 )
+from app.schemas.scan_compare import (
+    ComparedFindingSummary,
+    ComparisonSummary,
+    ScanComparisonRequest,
+    ScanComparisonResponse,
+)
 from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
+from app.services.scan_compare import compute_diff
 from app.services.scan_queue import CancelPublisher
 
 logger = logging.getLogger(__name__)
@@ -328,3 +335,136 @@ async def cancel_scan(
         # Don't raise — state is durable in PG; visible-failure mode.
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@scan_router.post(
+    "/compare",
+    status_code=status.HTTP_200_OK,
+    response_model=ScanComparisonResponse,
+)
+async def compare_scans(
+    org_id: UUID,
+    body: ScanComparisonRequest,
+    request: Request,
+    identity: AuthIdentity = Depends(require_org_membership()),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compare two scans by vulnerability fingerprint (Task 4.6).
+
+    Returns three categorized lists — new (current only), resolved
+    (baseline only), persisting (both) — plus a summary block with
+    counts + truncation flag.
+
+    Validation chain:
+      1. require_org_membership dep — path.org_id ↔ identity → 404
+      2. Pydantic ScanComparisonRequest — body shape → 422
+      3. Lookup BOTH scans WHERE id IN (...) AND org_id matches.
+         <2 rows → 404 (existence-hiding for cross-tenant scan_id)
+      4. Same-project guard: project_id must match → 409
+         scans_project_mismatch
+      5. Terminal-state guard: both scans in {COMPLETED, PARTIAL}
+         → else 409 scan_not_terminal (FAILED, CANCELED, and active
+         states all rejected — fake-resolved-findings prevention)
+      6. compute_diff (services/scan_compare.py) partitions by
+         fingerprint; MAX_FINDINGS_PER_CATEGORY cap respected
+      7. Emit SCAN_COMPARED audit (only DB write — read-only otherwise)
+      8. 200 ScanComparisonResponse
+
+    Auth: any-member (JWT or API key) — symmetric with scan-create
+    + cancel.
+    """
+    # Step 3: lookup both scans in ONE query (org-scoped via WHERE
+    # for defense-in-depth on top of RLS).
+    scans = (
+        await db.execute(
+            select(Scan).where(
+                Scan.id.in_([body.baseline_scan_id, body.current_scan_id]),
+                Scan.organization_id == org_id,
+            )
+        )
+    ).scalars().all()
+    by_id = {s.id: s for s in scans}
+    baseline = by_id.get(body.baseline_scan_id)
+    current = by_id.get(body.current_scan_id)
+    if baseline is None or current is None:
+        # 404 covers both "doesn't exist" and "exists but in another
+        # tenant" — same existence-hiding discipline as Task 4.5 cancel.
+        raise _NOT_FOUND
+
+    # Step 4: same-project guard. Cross-project comparison is a niche
+    # use case; rejecting now keeps the contract narrow. Removing
+    # later is an additive change.
+    if baseline.project_id != current.project_id:
+        raise HTTPException(
+            status_code=409, detail="scans_project_mismatch"
+        )
+
+    # Step 5: terminal-state guard. FAILED + CANCELED + active states
+    # all rejected — comparing against incomplete data reports fake
+    # "resolved" findings (vulnerabilities not yet discovered or
+    # aborted), not actually resolved. PARTIAL is the right boundary
+    # because some jobs ran successfully.
+    _COMPARE_OK = {ScanStatus.COMPLETED, ScanStatus.PARTIAL}
+    if baseline.status not in _COMPARE_OK or current.status not in _COMPARE_OK:
+        raise HTTPException(
+            status_code=409, detail="scan_not_terminal"
+        )
+
+    # Step 6: compute diff.
+    new_vulns, resolved_vulns, persisting_vulns, truncated = await compute_diff(
+        db, body.baseline_scan_id, body.current_scan_id
+    )
+
+    if truncated:
+        # Operational signal for capacity planning. Not an error.
+        from app.services.scan_compare import MAX_FINDINGS_PER_CATEGORY
+        logger.warning(
+            "scan_compare hit category cap of %d for org=%s, "
+            "baseline=%s, current=%s",
+            MAX_FINDINGS_PER_CATEGORY,
+            org_id,
+            body.baseline_scan_id,
+            body.current_scan_id,
+        )
+
+    # Step 7: audit emission. Compare is read-only; this is the only
+    # DB write. resource_id is the current scan (the "newer" of the
+    # two); baseline is in details so the audit row is self-explanatory.
+    actor_id = identity.user.id if identity.user is not None else None
+    audit_details: dict = {
+        "baseline_scan_id": str(body.baseline_scan_id),
+        "current_scan_id": str(body.current_scan_id),
+        "new_count": len(new_vulns),
+        "resolved_count": len(resolved_vulns),
+        "persisting_count": len(persisting_vulns),
+        "truncated": truncated,
+    }
+    if identity.api_key is not None:
+        audit_details["api_key_prefix"] = identity.api_key.key_prefix
+
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=actor_id,
+        action=ScanAction.SCAN_COMPARED,
+        resource_type="scan",
+        resource_id=body.current_scan_id,
+        ip_address=get_real_ip(request),
+        user_agent=request.headers.get("User-Agent"),
+        details=audit_details,  # type: ignore[arg-type]
+    )
+    await db.commit()
+
+    return ScanComparisonResponse(
+        baseline_scan_id=body.baseline_scan_id,
+        current_scan_id=body.current_scan_id,
+        summary=ComparisonSummary(
+            new_count=len(new_vulns),
+            resolved_count=len(resolved_vulns),
+            persisting_count=len(persisting_vulns),
+            truncated=truncated,
+        ),
+        new_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in new_vulns],
+        resolved_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in resolved_vulns],
+        persisting_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in persisting_vulns],
+    )
