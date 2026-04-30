@@ -33,6 +33,7 @@ from app.routes import api_keys as api_keys_routes
 from app.routes import auth as auth_routes
 from app.routes import mobile as mobile_routes
 from app.routes import projects as projects_routes
+from app.services.completions_consumer import CompletionsConsumer
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,19 @@ async def lifespan(app: FastAPI):
         logger.critical("startup: Redis unreachable — aborting boot: %s", e)
         await close_redis()
         raise
+
+    # Completions consumer (Task 4.2). Subscribes to
+    # shieldscan:completions and applies job-completion events to PG.
+    # See ADR-013 — Python is the sole writer for scan state.
+    completions_consumer = CompletionsConsumer(
+        session_factory=AsyncSessionLocal, redis=redis
+    )
+    await completions_consumer.start()
+
     try:
         yield
     finally:
+        await completions_consumer.stop()
         await close_redis()
 
 

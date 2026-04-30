@@ -98,10 +98,41 @@ class ProjectAction(str, PyEnum):
     PROJECT_CREDENTIAL_DELETED = "project.credential.deleted"
 
 
+class ScanAction(str, PyEnum):
+    """Scan-domain audit events (Task 4.2).
+
+    Splits from ``ProjectAction`` for the same reason that split from
+    ``AuthAction`` at Task 3.2: keep per-domain enums focused, prevent
+    a sprawling catch-all. Disjoint from the other action enums per
+    ``test_action_enum_values_are_globally_disjoint`` (auto-covered
+    via ``ALL_ACTION_ENUMS`` registry).
+
+    Audit policy for scans (DRIFT-LOG 2026-04-30 — terminal-aggregate-
+    only): per-job completion is captured in ``scan_jobs.status``
+    column, NOT in ``audit_logs``. Only scan-level transitions emit
+    audit rows. Don't ``helpfully'' add per-job audit values here —
+    that dilutes the audit log and breaks the design pin.
+    """
+
+    # === emitted in M4 ===
+    SCAN_DISPATCHED = "scan.dispatched"  # Task 4.2 orchestrator
+    SCAN_CANCELED = "scan.canceled"  # Task 4.5 cancel endpoint
+    SCAN_COMPLETED = "scan.completed"  # Task 4.2 completions consumer (terminal)
+    SCAN_FAILED = "scan.failed"  # Task 4.2 completions consumer (terminal)
+    SCAN_COMPARED = "scan.compared"  # Task 4.6 compare endpoint
+
+    # === reserved — declared early to freeze values for M5+ ===
+    SCAN_JOB_RETRIED = "scan.job.retried"  # M5+ worker retry policy
+
+
 # Registry of all action-enum classes. Add new enums here as they
-# land (ScanAction, FindingAction, etc.) so the global-disjointness
-# test auto-covers them without manual updates.
-ALL_ACTION_ENUMS: tuple[type[PyEnum], ...] = (AuthAction, ProjectAction)
+# land (FindingAction, etc.) so the global-disjointness test
+# auto-covers them without manual updates.
+ALL_ACTION_ENUMS: tuple[type[PyEnum], ...] = (
+    AuthAction,
+    ProjectAction,
+    ScanAction,
+)
 
 
 class AuditDetails(TypedDict, total=False):
@@ -125,6 +156,11 @@ class AuditDetails(TypedDict, total=False):
     method: str  # e.g. "email", "sms" — channel for verification/reset actions
     platform: str  # e.g. "android", "ios" — mobile-upload events
     size_bytes: int  # bytes of the uploaded artifact (mobile uploads)
+    scan_type: str  # e.g. "full_web", "mobile" — scan-domain events
+    priority: str  # e.g. "normal", "high" — scan dispatch
+    job_count: int  # number of ScanJob rows dispatched
+    finding_count: int  # aggregate findings from a completed scan
+    failure_reason: str  # e.g. "all_jobs_failed" — terminal-state context
 
 
 async def audit(
@@ -132,7 +168,7 @@ async def audit(
     *,
     organization_id: UUID,
     actor_id: UUID | None,
-    action: AuthAction | ProjectAction,
+    action: AuthAction | ProjectAction | ScanAction,
     resource_type: str,
     resource_id: UUID | None = None,
     ip_address: str | None = None,
