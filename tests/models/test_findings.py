@@ -103,6 +103,11 @@ def test_raw_finding_has_all_required_columns() -> None:
         "fingerprint",
         # addendum (trufflehog)
         "secret_verified",
+        # SPEC §7.3 schema extension (M6-close-followup, ADR-024)
+        "references",
+        "tags",
+        "cvss_vector",
+        "additional_cwes",
         # TimestampMixin
         "created_at",
         "updated_at",
@@ -385,6 +390,113 @@ async def test_create_vulnerability_and_history(db_session: AsyncSession) -> Non
     db_session.add(history)
     await db_session.commit()
     assert history.id is not None
+
+
+# ─── SPEC §7.3 schema extension (M6-close-followup, ADR-024) ────────────
+# Verifies columns-ready posture: SQLAlchemy model accepts the 4 new
+# fields. Ingest path tests (Pydantic schema + CompletionsConsumer
+# extension) deferred to future findings-ingest task per ADR-024.
+
+
+async def test_raw_finding_accepts_references_array(db_session: AsyncSession) -> None:
+    """SPEC §7.3: References is Optional[list[str]]."""
+    org, scan = await _setup_scan(db_session)
+    f = RawFinding(
+        **_base_finding_kwargs(org, scan, "fp-spec73-refs"),
+        engine_category=EngineCategory.DAST,
+        severity=Severity.HIGH,
+        references=[
+            "https://nvd.nist.gov/vuln/detail/CVE-2024-1234",
+            "https://example.com/advisory/2024-001",
+        ],
+    )
+    db_session.add(f)
+    await db_session.commit()
+    await db_session.refresh(f)
+    assert f.references == [
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-1234",
+        "https://example.com/advisory/2024-001",
+    ]
+
+
+async def test_raw_finding_accepts_tags_array(db_session: AsyncSession) -> None:
+    """SPEC §7.3: Tags is Optional[list[str]] (distinct from engine_category)."""
+    org, scan = await _setup_scan(db_session)
+    f = RawFinding(
+        **_base_finding_kwargs(org, scan, "fp-spec73-tags"),
+        engine_category=EngineCategory.DAST,
+        severity=Severity.HIGH,
+        tags=["xss", "owasp-top-10", "automated"],
+    )
+    db_session.add(f)
+    await db_session.commit()
+    await db_session.refresh(f)
+    assert f.tags == ["xss", "owasp-top-10", "automated"]
+
+
+async def test_raw_finding_accepts_cvss_vector_string(db_session: AsyncSession) -> None:
+    """SPEC §7.3: CVSSVector is Optional[str] (canonical CVSS:3.1/...)."""
+    org, scan = await _setup_scan(db_session)
+    f = RawFinding(
+        **_base_finding_kwargs(org, scan, "fp-spec73-cvss"),
+        engine_category=EngineCategory.DAST,
+        severity=Severity.CRITICAL,
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    )
+    db_session.add(f)
+    await db_session.commit()
+    await db_session.refresh(f)
+    assert f.cvss_vector == "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+
+
+async def test_raw_finding_accepts_additional_cwes_array(
+    db_session: AsyncSession,
+) -> None:
+    """SPEC §7.3: AdditionalCWEs is Optional[list[str]] for multi-CWE findings.
+
+    Load-bearing for ADR-024's M9 §8.2 forward-pin: cross-layer
+    correlation must consider {primary cwe_id} ∪ additional_cwes
+    intersection rather than primary cwe_id alone. Especially relevant
+    for Dep-Check, which routinely emits 2-4 CWEs per CVE.
+    """
+    org, scan = await _setup_scan(db_session)
+    f = RawFinding(
+        **_base_finding_kwargs(org, scan, "fp-spec73-multicwe"),
+        engine_category=EngineCategory.SCA,
+        severity=Severity.HIGH,
+        cwe_id="CWE-89",
+        additional_cwes=["CWE-20", "CWE-78"],
+    )
+    db_session.add(f)
+    await db_session.commit()
+    await db_session.refresh(f)
+    assert f.cwe_id == "CWE-89"
+    assert f.additional_cwes == ["CWE-20", "CWE-78"]
+
+
+async def test_raw_finding_new_fields_optional_when_absent(
+    db_session: AsyncSession,
+) -> None:
+    """SPEC §7.3: All 4 new fields are nullable; absent values OK.
+
+    Backward-compat regression guard: existing RawFinding insertions
+    (created before SPEC §7.3 extension landed) must still work without
+    setting any of the new fields. omitempty / Optional discipline holds
+    on both sides of the wire.
+    """
+    org, scan = await _setup_scan(db_session)
+    f = RawFinding(
+        **_base_finding_kwargs(org, scan, "fp-spec73-absent"),
+        engine_category=EngineCategory.DAST,
+        severity=Severity.LOW,
+    )
+    db_session.add(f)
+    await db_session.commit()
+    await db_session.refresh(f)
+    assert f.references is None
+    assert f.tags is None
+    assert f.cvss_vector is None
+    assert f.additional_cwes is None
 
 
 async def test_audit_log_is_append_only_shape(db_session: AsyncSession) -> None:

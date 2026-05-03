@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -99,6 +100,15 @@ class RawFinding(Base, TimestampMixin, TenantMixin):
     cwe_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
     owasp: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cvss_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # --- Categorical (SPEC §7.3 schema extension; M6-close-followup, ADR-024) ---
+    # Optional/nullable; columns-ready posture per Path A.
+    # Pydantic ingest schema + CompletionsConsumer extension deferred to a
+    # future findings-ingest task per ADR-024 "Python ingest scope" subsection.
+    references: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    cvss_vector: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    additional_cwes: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
 
     # --- Evidence: web / API (DAST, API tools) ---
     target_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
