@@ -1,0 +1,104 @@
+# shieldscan-api — DRIFT-LOG
+
+API-side design decisions, deferred work, and implementation deviations.
+Newest entries on top.
+
+For cross-cutting decisions affecting both `shieldscan-api` and
+`shieldscan-engine`, see `../shieldscan-docs/DRIFT-LOG.md`. For
+engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
+
+---
+
+### 2026-05-03 — Findings-ingest task closes (ADR-024 §3.2 + ADR-017 Task 5.5)
+
+**Two carry-forward concerns closed by this commit:**
+
+1. **ADR-024 §3.2 "Python ingest scope deferred" columns-ready posture closed.** Phase 2 of M6-close-followup (commit `938ae80`) landed the four SPEC §7.3 schema-extension columns (`references`, `tags`, `cvss_vector`, `additional_cwes`) on `raw_findings`, but `CompletionsConsumer` did not yet read them. This commit lands the consumer.
+
+2. **ADR-017 Task 5.5 cross-repo scope closed.** ADR-017 line 1452 anticipated Python-side ingest at "Task 5.5 cross-repo" scope; only the engine-side wire format landed at M5 close. This commit closes the long-standing cross-repo gap — overdue work since M5.
+
+**M9 prerequisite met:** `raw_findings` table now populates end-to-end; SPEC §8.1 AI Analysis Pipeline has the data it needs to operate. M9 implementation engineers can plan against a populated table rather than scoping ingest as part of M9 work.
+
+### 2026-05-03 — ADR-025 lands (project corpus's 4th asymmetric-cost ADR)
+
+**ADR-025 (CompletionsConsumer findings-ingest path — Pydantic schema + sequenced accumulator + RLS atomic ingest)** drafted in `shieldscan-docs/plans/2026-05-03-findings-ingest-design.md` §6; full ADR text lands in `shieldscan-docs/SPECIFICATION.md` §13 separately (post-implementation per Mahmoud's handling — ADR-025 §3.2 + §4.1 need revision to match the actual implemented schema before landing; see Deviation 7 in the consolidated entry below).
+
+**4th asymmetric-cost ADR** in the project corpus after:
+- ADR-022 (recon-as-pre-scan-helpers; M6.3)
+- ADR-023 (NativeRunner OutputFile mode; M6.7)
+- ADR-024 (RawFinding schema extension; M6-close-followup)
+
+The shared meta-principle continues to hold: **architectural commitments are made when the alternative is operationally worse, not when a generic threshold is met.** Extension cost (~9h) is asymmetrically smaller than alternative cost (M9 prerequisite missing; ADR-017 forcing-function contract unmet for over a milestone; columns-ready posture indefinitely open).
+
+**Trigger to promote to DEVELOPMENT-PATTERNS:** if a 5th+ ADR invokes the same meta-principle, document the reasoning shape explicitly (when to invoke vs when to defer to threshold-based promotion). 4 instances is now well above the 3-instance threshold; the meta-principle is project corpus norm and a DEVELOPMENT-PATTERNS entry is warranted at the next architectural-decision opportunity.
+
+### 2026-05-03 — ADR-017 forcing-function compliance (`test_consumer_aggregates_sequenced_findings`)
+
+**Pin (load-bearing).** The ADR-017 forcing-function test pin specified by name at ADR-017 line 1474-1475 has been honored for the first time in the project corpus. `test_consumer_aggregates_sequenced_findings` in `tests/services/test_completions_consumer_findings_ingest.py` synthesizes the canonical sequencing roundtrip:
+
+- 3 events × 833 + 833 + 834 findings = 2500 total
+- Events 1, 2 (intermediate, status=`partial_findings`): accumulator grows to 833, then 1666; **0 raw_findings rows**; ScanJob.status remains `running`
+- Event 3 (terminal, status=`completed`, finding_count=2500 authoritative per ADR-017 line 822): single-transaction commit produces **2500 raw_findings rows**; ScanJob.status updates to `completed`; ScanJob.finding_count = 2500; accumulator key `(scan_id, job_id)` cleared
+
+The test passes (Phase 3 verification). Future regressions surface immediately at this test name; future engineers reading the ADR-017 line 1474-1475 contract reference can search for `test_consumer_aggregates_sequenced_findings` and find the pin.
+
+### 2026-05-03 — Pydantic schema strictness decision (extra="forbid"; cross-repo schema-drift regression guard)
+
+**Pin.** `app.schemas.raw_findings.RawFindingCreate` uses `model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)`.
+
+`extra="forbid"` mirrors the engine-side `DisallowUnknownFields` discipline at `shieldscan-engine/internal/events/events.go` line 12-13. **Cross-repo schema-drift regression guard:** if the engine adds a field to `RawFinding` without a synchronized Pydantic schema update, ingest will reject the payload at the CompletionsConsumer layer. Same shape as ADR-024's synchronized extension workflow (Engine struct → Python schema → Alembic migration); same forcing-function discipline transferred from M4 Pydantic `extra="forbid"`.
+
+`populate_by_name=True` enables the mobile-field aliasing (engine wire `permission` → Python `mobile_permission`; engine wire `component_name` → Python `mobile_component_name`) without breaking direct-field-name construction in tests.
+
+**Forward-pin:** future engine wire-format changes (additional categorical fields, evidence map, structured references) need synchronized Pydantic + Alembic + ADR work. The cross-repo workflow is now established and inheritable.
+
+### 2026-05-03 — Service-class accumulator pattern (1st instance; track for promotion)
+
+**Pin (track-only).** `CompletionsConsumer._accumulator: dict[tuple[UUID, UUID], list[dict]]` guarded by `asyncio.Lock`, populated in `_handle_intermediate_event`, drained + cleared in `_handle_terminal_event` after successful commit.
+
+**1st instance** of the service-class accumulator pattern in the project corpus. Pattern shape:
+- Stateful service class (DI-friendly via constructor)
+- Async-loop-safe via `asyncio.Lock` (single-process; no cross-process coordination)
+- Process-local lifetime (cleared on process restart; ghost-queued janitor at OPS milestone handles ScanJob orphans)
+- Capture-and-clear-only-after-commit semantics (commit failure → accumulator retained for retry-via-redelivery)
+
+Track for promotion to DEVELOPMENT-PATTERNS at 3rd instance. Likely candidates for future instances: M9 cross-layer correlation accumulator (per-scan vulnerability dedup state); M11 dashboard fan-out aggregator (per-org real-time stream consolidation).
+
+### 2026-05-03 — Findings-ingest implementation deviations (consolidated; 9 deviations across Phases 0-3)
+
+**Pin (load-bearing for future-implementer reference).** Phase 0 (verification) + Phase 1 (Pydantic schema) + Phase 2 (CompletionsConsumer extension) + Phase 3 (integration tests + ADR-017 forcing-function pin) surfaced **nine factual/mechanical deviations** from the design doc's pre-verification expectations. All auto-corrected with documentation per the "factual deviations: auto-correct + document" protocol established during M6-close-followup work; **zero architectural deviations** required pause/re-approval.
+
+**Deviation 1 — `RawFinding.job_id` column does NOT exist (Phase 0).** Lean A: drop `job_id` from `finding_dicts`; per-engine attribution preserved through `tool_name`. Design doc §3.3.1 + §4.4 + §3.3.3 assumed `job_id` column. Resolution: `_build_finding_dicts` strips per-finding `scan_id` + `org_id`; `_persist` overrides with `scan_job.scan_id` + validated `org_uuid`.
+
+**Deviation 2 — Existing `_handle` filter rejects `partial_findings` event_type (Phase 0).** Auto-adapt: extended filter from `== "job_completed"` to `in ("job_completed", "partial_findings")`. Without this, sequenced intermediate events would be silently dropped → ADR-017 accumulator pattern broken. Behavioral pin: `test_handle_event_routes_partial_findings_event_type` locks the extension against future "tightening" regressions.
+
+**Deviation 3 — `SET LOCAL` vs `SET` for RLS preamble (Phase 0; revised at Phase 2 by Deviation 9).** Lean A: use `SET app.current_org_id = '<uuid>'` (no LOCAL); matches existing project pattern at `db/__init__.py:38`, pre-extension `completions_consumer.py:177`, `identity.py`, `audit.py`, `db/policies.py`. Revised at Phase 2 because parameterized form fails — see Deviation 9.
+
+**Deviation 4 — Multi-process accumulator + N>1 worker damage (Phase 0).** Accept-and-document. With N>1 uvicorn workers, each process accumulates independently and commits its own subset → duplicates AND/OR partial subsets. Mitigation: terminal-event path includes ScanJob-already-terminal short-circuit BEFORE bulk insert (`_persist` lines 387-401). Bounds damage at MVP scale; does not eliminate. **Genuine fix at scale: ADR-018 Streams + consumer-groups (deferred).** Revisit trigger: **first deployment with N>1 uvicorn workers**.
+
+**Deviation 5 — Mobile field name mismatch engine ↔ model (Phase 1).** Engine wire emits `permission` + `component_name`; Python model has `mobile_permission` + `mobile_component_name`. Auto-adapt: Pydantic `Field(alias=...)` + `populate_by_name=True`; `model_dump(by_alias=False)` in `_build_finding_dicts` ensures SQLAlchemy column names land in the dict (wire aliases would fail with unknown-column errors).
+
+**Deviation 6 — `engine_category` Literal has 13 values, not 11 (Phase 1).** Design doc §3.2 listed 11 (`dast` through `container`); actual SQLAlchemy `EngineCategory` enum has 13 (adds `spa` + `discovery` per SPEC §5.3 + ADDENDUM-TOOLS-5). Auto-adapt: Pydantic Literal mirrors the 13-value set. Test `test_engine_category_has_thirteen_values_including_spa_and_discovery` (in `tests/models/test_findings.py`) pins this behaviorally.
+
+**Deviation 7 — ADR-025 §3.2 / §4.1 Pydantic schema mismatches (Phase 1; deferred to ADR-025 followup).** Design doc §3.2's example Pydantic schema has 4 mismatch shapes vs the actual model: (a) missing `title`/`description`/`owasp`/`cvss_score`/`parameter`/`payload`/`raw_output_ref`; (b) wrong SSL field names (`ssl_cipher_suite`/`ssl_cert_subject` vs actual `cipher_suite`/`cert_subject`); (c) wrong mobile field names (no aliases); (d) missing `spa`+`discovery` enum values. **Out of scope for this commit.** Mahmoud handles the design-doc revision + ADR-025 final text in `shieldscan-docs` separately post-implementation.
+
+**Deviation 8 — `ScanJob.completed_at` column does NOT exist (Phase 2).** Only `Scan` has `completed_at`; ScanJob does not. Design doc §3.3.1 line 352 (`scan_job.completed_at = datetime.fromisoformat(event["timestamp"])`) would fail at SQLAlchemy time. Auto-adapt: dropped `completed_at` updates from all paths; preserved existing handler's behavior at pre-extension lines 204-207.
+
+**Deviation 9 — PostgreSQL `SET` admin command rejects bind parameters (Phase 2).** asyncpg surfaces this as `syntax error at or near "$1"`; `SET` is a Postgres admin command, not regular SQL. Resolution: validate `organization_id` as `UUID()` first (raises on anything that isn't 36 hex+hyphen chars), then f-string interpolate. **Strictly better than the existing project pattern** at `completions_consumer.py:177` (which f-string-interpolates without UUID validation) — this implementation adds defense-in-depth in passing while matching established f-string posture. Revises Phase 0 Deviation 3 lean (parameterized form was incorrect).
+
+**Pattern observation:** all 9 deviations are factual/mechanical (assumed-state vs actual-state mismatches); zero architectural deviations needed pause/re-approval. The "verify-then-adapt-then-document" discipline established during M6-close-followup work continued to operate cleanly. Pre-implementation guidance is generated against general-purpose semantics; verification catches actual-behavior gaps. This is the third project-corpus task where the pattern has held (M6.3 httpx stdin, M6-followup head-vs-root, findings-ingest 9-deviation set) — the discipline is project corpus norm.
+
+### 2026-05-03 — `_scanjob_already_terminal` removal (honest code over misleading helper; refactor during Phase 3)
+
+**Pin.** A late-Phase-2 / pre-Phase-3 verification check (per the user's pre-Phase-3 verification request) surfaced that the `_scanjob_already_terminal(event)` helper introduced in Phase 2 always returned `True` unconditionally — its docstring acknowledged this as a "future hook if more nuanced returns from `_persist` surface later." The method NAME suggested state-checking that the implementation didn't perform.
+
+**Subtle bug shape avoided:** if a future engineer "fixes" the method to actually re-fetch ScanJob.status but reads cached state (e.g., from the event payload, or a stale ORM identity-map entry) instead of DB-fresh, the persist-short-circuit case leaks accumulator entries. The misleading helper was a future-engineer trap.
+
+**Resolution (refactor during Phase 3 before integration tests started):** removed `_scanjob_already_terminal` entirely; replaced the conditional cleanup with a straightforward try/except pattern in `_handle_terminal_event`:
+
+- `_persist` raises → propagates → accumulator retained for retry-via-redelivery (Phase-0 Deviation 5 cleanup ordering preserved)
+- `_persist` returns (True or False) → reach the cleanup block → clear unconditionally
+
+Same observable behavior (all existing unit tests still pass after refactor; 24/24 at the Phase 3 boundary); honest code; future-engineer trap eliminated. Engineering principle reinforced: **method names should reflect what the implementation does, not what we hope it might do.**
+
+---

@@ -1,15 +1,21 @@
 """Completions consumer for ``shieldscan:completions`` Pub/Sub channel
-(Task 4.2).
+(Task 4.2 + findings-ingest extension per ADR-025).
 
-Subscribes to the SPEC §7.3 completion channel and applies each
-``job_completed`` event to the matching ``ScanJob`` row + aggregates
-the parent ``Scan.status`` when all sibling jobs reach a terminal
-state.
+Subscribes to the SPEC §7.3 completion channel and applies each event
+to the matching ``ScanJob`` row + aggregates the parent ``Scan.status``
+when all sibling jobs reach a terminal state. As of the findings-
+ingest extension, ALSO inserts the per-event ``findings[]`` array into
+``raw_findings`` in the same database transaction as the
+``ScanJob.status`` update — closing ADR-024 §3.2 "Python ingest scope
+deferred" + ADR-017 Task 5.5 cross-repo follow-up.
 
 State-machine ownership (ADR-013):
   Python is the SOLE writer for scan + scan_job state. Workers signal
   via Redis events; this consumer is the entry point that turns those
-  signals back into PostgreSQL UPDATEs.
+  signals back into PostgreSQL UPDATEs (and now INSERTs for findings).
+  Findings ingest + ScanJob update commit atomically per ADR-013's
+  sole-writer guarantee — if the findings INSERT fails, ScanJob
+  status stays ``running`` and Pub/Sub redelivery re-fires the event.
 
 Audit policy (DRIFT-LOG 2026-04-30 H.2):
   Per-job completion is captured in ``scan_jobs.status`` only — no
@@ -17,22 +23,52 @@ Audit policy (DRIFT-LOG 2026-04-30 H.2):
   (SCAN_COMPLETED / SCAN_FAILED) emit audit rows. Pin via
   ``test_consumer_does_not_audit_per_job``.
 
-Multi-process duplicate handling (DRIFT-LOG H.4):
+Sequencing (ADR-017):
+  Jobs producing >1000 findings emit multiple events with
+  ``event_seq.total > 1`` per ADR-017's soft cap. Intermediate events
+  use ``event_type="partial_findings"`` + ``status="partial_findings"``;
+  the terminal event carries the canonical status + authoritative
+  ``finding_count``. Findings from intermediate events accumulate in
+  ``self._accumulator`` (process-local, asyncio.Lock-guarded); the
+  terminal event drains the accumulator + commits all findings + the
+  ScanJob update in a single transaction.
+
+  Forcing-function test: ``test_consumer_aggregates_sequenced_findings``
+  pins the contract per ADR-017 line 1474-1475.
+
+Multi-process duplicate handling (DRIFT-LOG H.4 + ADR-025):
   Each uvicorn worker subscribes to the channel; with N>1 workers,
   every completion event is processed N times. Second-and-onward
   handlers see a job already in the terminal state and short-circuit
-  with a DEBUG log. Acceptable double-work at MVP scale; consumer-
-  groups (which require Streams) are deferred to scale milestone.
+  with a DEBUG log. The findings-ingest extension PRESERVES this
+  short-circuit on terminal-event paths to bound damage at MVP scale
+  (each worker would otherwise commit its own subset of accumulated
+  findings, producing duplicates AND/OR partial subsets depending on
+  Pub/Sub ordering). Honest acknowledgment: the short-circuit bounds
+  the damage but does not eliminate it; the genuine fix is ADR-018
+  Streams + consumer-groups, deferred to scale milestone. Trigger to
+  revisit: first deployment with N>1 uvicorn workers.
+
+RLS:
+  No request context — the consumer manages its own ``AsyncSession``
+  per event and SETs ``app.current_org_id`` from the event's
+  ``organization_id`` field before any RLS-scoped read or write.
+  Parameterized form (``text("SET app.current_org_id = :org_id"),
+  {"org_id": str(org_id)}``); matches the existing project pattern at
+  ``identity.py``, ``audit.py``, ``db/policies.py``.
 
 Lifecycle:
   ``CompletionsConsumer.start()`` spawns the consume loop as an
   asyncio task. ``stop()`` cancels and waits for it to drain. Wired
   into the FastAPI lifespan in ``main.py``.
 
-RLS:
-  No request context — the consumer manages its own ``AsyncSession``
-  per event and SETs ``app.current_org_id`` from the event's
-  ``organization_id`` field before any RLS-scoped read or write.
+References:
+  - ADR-013 Python sole writer (atomicity invariant)
+  - ADR-017 Findings inline + sequencing
+  - ADR-024 §3.2 RawFinding schema extension columns-ready posture
+    (closed by this implementation)
+  - ADR-025 (shieldscan-docs SPECIFICATION.md §13) — Pydantic
+    strictness + service-class accumulator + RLS atomic ingest
 """
 
 from __future__ import annotations
@@ -40,14 +76,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Awaitable, Callable
-from uuid import UUID
+from typing import Callable
+from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import select_fresh
+from app.models.raw_findings import RawFinding
 from app.models.scans import Scan, ScanJob, ScanStatus
+from app.schemas.raw_findings import RawFindingCreate
 from app.services.audit import ScanAction, audit
 
 logger = logging.getLogger(__name__)
@@ -59,6 +97,14 @@ logger = logging.getLogger(__name__)
 _TERMINAL_JOB_STATUSES: frozenset[str] = frozenset(
     {"completed", "failed", "canceled"}
 )
+# Note: "partial" (a terminal status per ADR-017 sequencing) is NOT
+# in this set. Adding it would extend multi-process short-circuit
+# coverage to partial events but would also require updating
+# _maybe_complete_scan's aggregation logic to recognize "partial" as
+# a non-failure terminal — that's M4 Task 4.2 scope, not findings-
+# ingest. Trade-off accepted at MVP scale (single uvicorn worker;
+# duplicate events don't arrive). Trigger to revisit: same as the
+# multi-process posture — first deployment with N>1 uvicorn workers.
 
 
 class CompletionsConsumer:
@@ -69,6 +115,10 @@ class CompletionsConsumer:
     ``async_sessionmaker[AsyncSession]``) — typically
     ``app.db.AsyncSessionLocal`` — so each event opens its own session
     independent of any request-bound session.
+
+    As of the findings-ingest extension (ADR-025), also maintains a
+    process-local accumulator for sequenced events (``event_seq.total
+    > 1``); see module docstring sequencing section.
     """
 
     CHANNEL = "shieldscan:completions"
@@ -82,6 +132,18 @@ class CompletionsConsumer:
         self._redis = redis
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+
+        # Findings accumulator for sequenced events (ADR-025; ADR-017
+        # §3.3 sequencing contract). Keyed by (scan_id, job_id);
+        # populated by intermediate events; drained + cleared by the
+        # terminal event after successful commit. Lock guards both
+        # mutation paths against concurrent asyncio task scheduling.
+        # Process-local: at MVP scale (1 uvicorn worker) this is
+        # complete; at scale (N>1 workers) the multi-process posture
+        # documented in module docstring applies (ADR-018 Streams +
+        # consumer-groups is the genuine fix).
+        self._accumulator: dict[tuple[UUID, UUID], list[dict]] = {}
+        self._accumulator_lock = asyncio.Lock()
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -154,27 +216,217 @@ class CompletionsConsumer:
                 e,
             )
 
-    # ---------------------------------------------------------------- handler (unit-testable)
+    # ---------------------------------------------------------------- routing (unit-testable)
 
     async def _handle(self, event: dict) -> None:
-        """Apply one completion event to the DB.
+        """Route one completion event to the appropriate handler based
+        on ``event_type``, ``event_seq``, and ``status``.
 
-        Recognized ``event_type`` values: ``job_completed``. Anything
+        Recognized ``event_type`` values: ``job_completed`` (single-
+        event jobs OR terminal sequenced events) and
+        ``partial_findings`` (intermediate sequenced events). Anything
         else is silently ignored (defensive — workers should only
-        publish ``job_completed`` to this channel, but we don't rely
-        on it being clean).
+        publish these types to this channel, but we don't rely on it
+        being clean).
+
+        Routing matrix:
+
+          status              event_seq.total  → handler
+          ------              ---------------  ---------------
+          failed/canceled     any              → status-only update
+          completed/partial   1                → single-event ingest
+          partial_findings    >1               → intermediate accumulate
+          completed/partial   >1               → terminal ingest
+          else                                 → defensive log + skip
         """
-        if event.get("event_type") != "job_completed":
+        # Per Phase-0 Deviation 2: extend filter to accept BOTH
+        # job_completed AND partial_findings event types. Sequenced
+        # intermediate events arrive with event_type="partial_findings"
+        # per ADR-017 + SPEC §7.3; the pre-extension filter would
+        # silently drop them and the accumulator would never trigger.
+        event_type = event.get("event_type")
+        if event_type not in ("job_completed", "partial_findings"):
             return  # ignore unrecognized
 
+        status = event.get("status")
+        event_seq = event.get("event_seq", {"index": 1, "total": 1})
+        total = event_seq.get("total", 1)
+
+        if status in ("failed", "canceled"):
+            # No findings on these events per SPEC §7.3 line 817
+            # ("findings is REQUIRED on terminal events ... and absent
+            # on failed/canceled events"). Status-only update path.
+            await self._handle_failed_or_canceled_event(event)
+        elif total == 1:
+            # Single-event job (≤1000 findings).
+            await self._handle_single_event(event)
+        elif status == "partial_findings":
+            # Intermediate sequenced event — accumulate; no DB write.
+            await self._handle_intermediate_event(event)
+        elif status in ("completed", "partial"):
+            # Terminal sequenced event — drain accumulator + commit.
+            await self._handle_terminal_event(event)
+        else:
+            # Defensive: unknown status combination — log + skip. New
+            # status values surface as engineer-visible signals here.
+            logger.error(
+                "completions consumer: unknown status combination "
+                "status=%r event_seq=%r scan_id=%s job_id=%s",
+                status,
+                event_seq,
+                event.get("scan_id"),
+                event.get("job_id"),
+            )
+
+    # ---------------------------------------------------------------- event handlers
+
+    async def _handle_failed_or_canceled_event(self, event: dict) -> None:
+        """Status-only update path (no findings ingest). Mirrors the
+        pre-findings-ingest behavior of the M4 Task 4.2 handler."""
+        await self._persist(event, finding_dicts=[])
+
+    async def _handle_single_event(self, event: dict) -> None:
+        """Single-event ingest (event_seq.total == 1; ≤1000 findings).
+
+        Validate findings via Pydantic; assemble finding_dicts
+        (excluding ``job_id`` per Phase-0 Deviation 1 — RawFinding has
+        no such column); insert + ScanJob update commit atomically.
+        """
+        finding_dicts = self._build_finding_dicts(event.get("findings", []))
+        await self._persist(event, finding_dicts=finding_dicts)
+
+    async def _handle_intermediate_event(self, event: dict) -> None:
+        """Intermediate sequenced event (status="partial_findings").
+
+        Validate findings via Pydantic; append to accumulator under
+        the accumulator lock. NO database write; NO ScanJob update —
+        both are deferred to the terminal event per ADR-017.
+        """
+        scan_id = UUID(event["scan_id"])
         job_id = UUID(event["job_id"])
+
+        # Validate; failure surfaces cross-repo schema drift.
+        finding_dicts = self._build_finding_dicts(event.get("findings", []))
+
+        async with self._accumulator_lock:
+            key = (scan_id, job_id)
+            accumulated = self._accumulator.setdefault(key, [])
+            accumulated.extend(finding_dicts)
+
+        # Intentionally no DB I/O here. Per ADR-017 sequencing
+        # contract: intermediate events accumulate; terminal event
+        # commits the union.
+
+    async def _handle_terminal_event(self, event: dict) -> None:
+        """Terminal sequenced event (status in {"completed", "partial"}
+        and event_seq.total > 1).
+
+        Validate this event's findings; assemble accumulated_findings ∪
+        this_event_findings; persist + clear accumulator after commit
+        succeeds (per Phase-0 Deviation 5 cleanup ordering).
+
+        If commit fails: accumulator retains data for retry-via-
+        redelivery semantics. Per Phase-0 Deviation 5: clear ONLY
+        AFTER successful commit; reverse ordering creates data-loss-
+        on-commit-failure bugs.
+        """
+        scan_id = UUID(event["scan_id"])
+        job_id = UUID(event["job_id"])
+        key = (scan_id, job_id)
+
+        # Validate this event's findings. Cross-repo schema drift
+        # surfaces here at the terminal event boundary too — not just
+        # at intermediate events.
+        this_event_dicts = self._build_finding_dicts(event.get("findings", []))
+
+        # Lock briefly to capture accumulator state; release during DB
+        # I/O to keep the lock window minimal. The accumulator is NOT
+        # cleared yet — clear only after commit succeeds.
+        async with self._accumulator_lock:
+            accumulated = list(self._accumulator.get(key, []))
+
+        all_finding_dicts = accumulated + this_event_dicts
+
+        # Persist (insert + ScanJob update + scan-aggregate, atomic
+        # per ADR-013). _persist's short-circuit check (job already
+        # terminal) protects against N>1 multi-process worker damage
+        # per Phase-0 Deviation 4. _persist raises on commit failure;
+        # we let that propagate so the accumulator retains data for
+        # retry-via-redelivery (Phase-0 Deviation 5 cleanup ordering).
+        await self._persist(event, finding_dicts=all_finding_dicts)
+
+        # Reached only on non-raise return from _persist:
+        #   - True: commit succeeded; data is persisted.
+        #   - False: short-circuited (peer worker already wrote OR
+        #     unknown job OR malformed org_id). In all three cases
+        #     the accumulator entry is no longer useful — peer
+        #     wrote our data, OR the data is fundamentally
+        #     undeliverable. Clear in both cases.
+        # If _persist raised, the `await` above re-raises and we
+        # never reach this point; accumulator stays.
+        async with self._accumulator_lock:
+            self._accumulator.pop(key, None)
+
+    # ---------------------------------------------------------------- persistence helper
+
+    async def _persist(self, event: dict, finding_dicts: list[dict]) -> bool:
+        """Open session, SET RLS, fetch ScanJob, short-circuit if
+        terminal, bulk-insert findings (if any), update ScanJob.status
+        + finding_count + duration_ms, aggregate parent Scan, commit.
+
+        Returns True if the commit landed; False if short-circuited
+        (job already terminal — peer worker handled it). Raises on
+        SQLAlchemy errors so the caller can decide retry behavior
+        (accumulator retention etc.).
+
+        Per Phase-0 Deviation 3: ``SET app.current_org_id`` (no LOCAL),
+        parameterized form. Matches existing project pattern.
+
+        Per Phase-0 Deviation 4: short-circuit BEFORE bulk insert
+        when ScanJob already terminal — bounds N>1 multi-process
+        worker damage at MVP scale.
+        """
+        job_id_raw = event["job_id"]
         org_id = event["organization_id"]
         new_status = event["status"]
         finding_count = event.get("finding_count", 0)
         duration_ms = event.get("duration_ms")
 
+        try:
+            job_id = UUID(job_id_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "completions consumer: malformed job_id=%r; dropping",
+                job_id_raw,
+            )
+            return False
+
+        # PostgreSQL's `SET` admin command does NOT accept bind
+        # parameters (asyncpg surfaces this as a syntax error at $1).
+        # The existing project pattern uses f-string interpolation;
+        # we add UUID validation as defense-in-depth so any non-UUID
+        # value rejects BEFORE reaching the SQL string. UUID() raises
+        # ValueError on anything that isn't a 36-char hex+hyphen
+        # string, so f-string interpolation is safe by construction.
+        try:
+            org_uuid = UUID(str(org_id))
+        except (TypeError, ValueError):
+            logger.warning(
+                "completions consumer: malformed organization_id=%r; "
+                "dropping event for job_id=%s",
+                org_id,
+                job_id,
+            )
+            return False
+
         async with self._session_factory() as db:
-            await db.execute(text(f"SET app.current_org_id = '{org_id}'"))
+            # RLS preamble. f-string is safe because org_uuid is a
+            # validated UUID (no SQL chars possible). Matches existing
+            # project pattern at completions_consumer.py (pre-extension
+            # line 177), identity.py, audit.py, db/policies.py.
+            await db.execute(
+                text(f"SET app.current_org_id = '{org_uuid}'")
+            )
 
             job = (
                 await select_fresh(
@@ -187,19 +439,44 @@ class CompletionsConsumer:
                     "(scan likely deleted before completion landed)",
                     job_id,
                 )
-                return
+                return False
 
             # Multi-process duplicate handling — see module docstring.
+            # Phase-0 Deviation 4: applies on terminal-event paths too,
+            # bounding N>1 worker damage. Short-circuit BEFORE bulk
+            # insert so peer-worker-handled events don't leak stale
+            # finding rows.
             if (
                 job.status == new_status
                 and job.status in _TERMINAL_JOB_STATUSES
             ):
                 logger.debug(
-                    "completion event for already-terminal job_id=%s; "
-                    "expected at MVP with N>1 uvicorn workers, not at scale",
+                    "completion event for already-terminal job_id=%s "
+                    "(status=%s); peer process handled — skipping ingest "
+                    "+ status update",
                     job_id,
+                    job.status,
                 )
-                return
+                return False
+
+            # Bulk insert findings (if any). Per Phase-0 Deviation 1:
+            # no job_id column; scan_id + organization_id are derived
+            # from the authoritative ScanJob row, not from per-finding
+            # payload (engine processor populates per-finding scan_id /
+            # org_id but Pydantic-validated dicts already exclude them
+            # via _build_finding_dicts). uuid4() for the primary key;
+            # TimestampMixin's created_at / updated_at auto-populate.
+            if finding_dicts:
+                enriched = [
+                    {
+                        **fd,
+                        "id": uuid4(),
+                        "organization_id": UUID(str(org_id)),
+                        "scan_id": job.scan_id,
+                    }
+                    for fd in finding_dicts
+                ]
+                await db.execute(insert(RawFinding), enriched)
 
             job.status = new_status
             job.finding_count = finding_count
@@ -213,6 +490,43 @@ class CompletionsConsumer:
             await self._maybe_complete_scan(db, job.scan_id)
 
             await db.commit()
+        return True
+
+    # ---------------------------------------------------------------- finding_dict builder
+
+    def _build_finding_dicts(self, raw_findings: list) -> list[dict]:
+        """Validate each finding via ``RawFindingCreate`` and return a
+        list of dicts ready for ``insert(RawFinding).values(...)``.
+
+        Per Phase-0 Deviations 1 + 5 (mobile alias) + 8 (no
+        completed_at): each dict excludes ``scan_id`` and ``org_id``
+        (both derived from ScanJob in ``_persist``) and uses
+        ``model_dump(by_alias=False)`` so SQLAlchemy column names land
+        in the dict (``mobile_permission`` not the wire alias
+        ``permission``); inserting wire aliases would fail with
+        unknown-column errors.
+
+        Empty input returns ``[]`` so caller's status-only path remains
+        cheap.
+        """
+        if not raw_findings:
+            return []
+        dicts: list[dict] = []
+        for raw in raw_findings:
+            validated = RawFindingCreate.model_validate(raw)
+            # by_alias=False → Python field names (mobile_permission,
+            # mobile_component_name); by_alias=True would emit wire
+            # aliases (permission, component_name) which RawFinding
+            # has no columns for.
+            d = validated.model_dump(by_alias=False)
+            # Drop scan_id and org_id from the per-finding payload;
+            # the authoritative scope comes from ScanJob (Phase-0
+            # Deviation 1). Inserting Pydantic's None into a non-null
+            # column would also fail.
+            d.pop("scan_id", None)
+            d.pop("org_id", None)
+            dicts.append(d)
+        return dicts
 
     # ---------------------------------------------------------------- aggregate
 
