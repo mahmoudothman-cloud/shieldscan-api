@@ -292,7 +292,13 @@ class ScanOrchestrator:
                 payload["mobile_config"] = {
                     "upload_ref": f"r2://{upload.r2_key}",
                     "platform": upload.platform.value,
-                    "analysis_type": (scan.config or {}).get("analysis_type", "both"),
+                    # Default flipped from "both" to "static" per Task 7.4
+                    # D-PLAN-7 Path (c) — engine-side MobSF consumer ships
+                    # v1 STATIC only; dynamic + source-tree analysis are
+                    # forward-pinned. Overrideable via scan.config when v2
+                    # lands. Cross-reference: shieldscan-engine commit (TBD;
+                    # Task 7.4 Phase 4 atomic).
+                    "analysis_type": (scan.config or {}).get("analysis_type", "static"),
                 }
 
         return payload

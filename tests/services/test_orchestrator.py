@@ -226,8 +226,38 @@ async def test_dispatch_mobile_creates_one_mobsf_job_with_mobile_config(
     assert payload["engine"] == "mobsf"
     assert payload["mobile_config"]["upload_ref"].startswith("r2://")
     assert payload["mobile_config"]["platform"] == "android"
+    # Explicit scan.config override flows through verbatim (this fixture
+    # sets analysis_type="both" — used to forward-pin v2 dynamic+static
+    # combined analysis once shieldscan-engine MobSF consumer supports it).
     assert payload["mobile_config"]["analysis_type"] == "both"
     assert payload["target"]["target_type"] == "mobile"
+
+
+# ---------------------------------------------------------------- 2b. mobile analysis_type default
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mobile_analysis_type_defaults_to_static(
+    mobile_scan, db_session, fake_redis
+):
+    """D-PLAN-7 Path (c): when scan.config carries no analysis_type override,
+    the orchestrator emits "static" — matching the engine-side MobSF
+    consumer v1 lock (dynamic + source-tree forward-pinned)."""
+    s = mobile_scan
+    # Clear the analysis_type override the fixture seeds.
+    s["scan"].config = {}
+    db_session.add(s["scan"])
+    await db_session.commit()
+    await db_session.refresh(s["scan"])
+    s["scan"].project = s["scan"].project  # rehydrate relationship attr
+
+    orch = ScanOrchestrator(db_session, fake_redis)
+    jobs = await orch.dispatch(s["scan"], s["identity"])
+    assert len(jobs) == 1
+
+    item = await fake_redis.brpop("shieldscan:queue:high", timeout=1)
+    payload = json.loads(item[1])
+    assert payload["mobile_config"]["analysis_type"] == "static"
 
 
 # ---------------------------------------------------------------- 3. idempotency key format
