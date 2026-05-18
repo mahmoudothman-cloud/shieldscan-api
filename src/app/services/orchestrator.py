@@ -111,7 +111,7 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
     ),
     ScanType.API: ("nuclei_api", "zap_api", "corstest"),
     ScanType.MOBILE: ("mobsf",),
-    ScanType.CONTAINER: ("trivy_image", "checkov"),
+    ScanType.CONTAINER: ("trivy-container", "checkov"),
     ScanType.FULL_SPECTRUM: (
         "subfinder",
         "httpx",
@@ -124,7 +124,7 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
         "semgrep",
         "gitleaks",
         "dependency_check",
-        "trivy",
+        "trivy-fs",
         "corstest",
         "checkov",
     ),
