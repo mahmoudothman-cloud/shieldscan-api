@@ -109,7 +109,7 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
         "gitleaks",
         "dependency_check",
     ),
-    ScanType.API: ("nuclei_api", "zap_api", "corstest"),
+    ScanType.API: ("nuclei_api", "zap_api", "corstest", "sqlmap"),
     ScanType.MOBILE: ("mobsf",),
     ScanType.CONTAINER: ("trivy-container", "checkov"),
     ScanType.FULL_SPECTRUM: (
@@ -119,6 +119,7 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
         "zap",
         "wapiti",
         "nikto",
+        "sqlmap",
         "nmap",
         "sslyze",
         "semgrep",
