@@ -43,12 +43,15 @@ from enum import Enum as PyEnum
 from typing import Final
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import AuthIdentity
 from app.models.mobile import MobileUpload
+from app.models.projects import ProjectCredential
 from app.models.scans import Scan, ScanJob, ScanType
 from app.services.audit import ScanAction, audit
+from app.services.credentials import decrypt_credential
 from app.services.scan_queue import ScanQueue
 
 logger = logging.getLogger(__name__)
@@ -244,6 +247,46 @@ class ScanOrchestrator:
             details=details,  # type: ignore[arg-type]
         )
 
+        # 3b. ADR-015 enablement — credential lookup + decrypt + audit.
+        #     ProjectCredential is per-project (unique=True per M1
+        #     invariant + Task 3.X migration d4f6b1e9a527); scalar_one_
+        #     or_none returns 0-or-1 row. Decrypt + audit ONCE per
+        #     dispatch (not per job — credential is per-project, not
+        #     per-tool). Audit policy: scan-level only per
+        #     ScanAction docstring (per-job audit deliberately skipped).
+        #     auth_payload (or None) is threaded into _build_job_payload
+        #     so every job in this dispatch carries the same auth.
+        cred_result = await self.db.execute(
+            select(ProjectCredential).where(
+                ProjectCredential.project_id == scan.project_id
+            )
+        )
+        credential = cred_result.scalar_one_or_none()
+        auth_payload: dict | None = None
+        if credential is not None:
+            decrypted = decrypt_credential(credential.encrypted_data)
+            # Q3 (a) discriminator translation: DB `auth_type` → wire `type`.
+            auth_payload = {
+                "type": credential.auth_type,
+                "data": decrypted["data"],
+            }
+            if "fields" in decrypted:
+                auth_payload["fields"] = decrypted["fields"]
+            await audit(
+                self.db,
+                organization_id=scan.organization_id,
+                actor_id=actor_id,
+                action=ScanAction.SCAN_CREDENTIAL_DECRYPTED,
+                resource_type="scan",
+                resource_id=scan.id,
+                ip_address=request_ip,
+                user_agent=user_agent,
+                details={
+                    "credential_id": str(credential.id),
+                    "credential_auth_type": credential.auth_type,
+                },  # type: ignore[arg-type]
+            )
+
         # 4. COMMIT — H.3 ordering. After this, DB state is durable.
         await self.db.commit()
 
@@ -252,17 +295,24 @@ class ScanOrchestrator:
         #    will surface and recover them. Visible failure > silent
         #    failure (DRIFT-LOG H.3 entry).
         for job in jobs:
-            payload = await self._build_job_payload(scan, job)
+            payload = await self._build_job_payload(scan, job, auth_payload)
             await self.queue.dispatch(priority.value, payload)
 
         return jobs
 
-    async def _build_job_payload(self, scan: Scan, job: ScanJob) -> dict:
+    async def _build_job_payload(
+        self,
+        scan: Scan,
+        job: ScanJob,
+        auth_payload: dict | None,
+    ) -> dict:
         """Construct the SPEC §7.1 job-dispatch payload.
 
-        ``auth`` is intentionally ``None`` pending ADR-015 (decrypted
-        credentials in Redis transit). Pinned by
-        ``test_dispatch_payload_auth_is_null_pending_adr_015``.
+        ``auth_payload`` is the pre-built credential dict (or None)
+        constructed once per dispatch in ``dispatch()`` per ADR-015
+        enablement; every job in a dispatch shares the same auth.
+        ``None`` is the canonical credential-less-project value
+        (legacy null path preserved).
 
         ``callback_stream`` (renamed from plan-literal ``callback_channel``)
         reflects the ADR-014 vocabulary shift to Redis Streams.
@@ -278,7 +328,7 @@ class ScanOrchestrator:
                 "target_type": _target_type_for(scan.scan_type),
                 "domain_verified": scan.project.domain_verified,
             },
-            "auth": None,  # TODO(M5+): inject decrypted credential — see ADR-015 (deferred).
+            "auth": auth_payload,
             "config": dict(scan.config or {}),
             "mobile_config": None,
             "callback_stream": f"shieldscan:progress:{scan.id}",

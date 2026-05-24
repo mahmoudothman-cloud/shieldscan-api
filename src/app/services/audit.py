@@ -121,6 +121,9 @@ class ScanAction(str, PyEnum):
     SCAN_FAILED = "scan.failed"  # Task 4.2 completions consumer (terminal)
     SCAN_COMPARED = "scan.compared"  # Task 4.6 compare endpoint
 
+    # === emitted in M5+ (ADR-015 enablement) ===
+    SCAN_CREDENTIAL_DECRYPTED = "scan.credential_decrypted"  # ADR-015 enablement; one row per credential-bearing dispatch
+
     # === reserved — declared early to freeze values for M5+ ===
     SCAN_JOB_RETRIED = "scan.job.retried"  # M5+ worker retry policy
 

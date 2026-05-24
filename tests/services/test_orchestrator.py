@@ -25,11 +25,14 @@ from sqlalchemy import select
 
 from app.dependencies import AuthIdentity
 from app.models.identity import APIKey, Membership, MembershipRole, Organization, User
+from app.models.audit import AuditLog
 from app.models.mobile import MobilePlatform, MobileUpload
-from app.models.projects import Project
+from app.models.projects import Project, ProjectCredential
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
 from app.services.api_keys import generate_api_key
+from app.services.audit import ScanAction
 from app.services.auth import hash_password
+from app.services.credentials import encrypt_credential
 from app.services.orchestrator import (
     SCAN_TYPE_TOOLS,
     ScanOrchestrator,
@@ -310,22 +313,120 @@ async def test_dispatch_payload_matches_spec_71_shape(web_scan, db_session, fake
     assert payload["created_at"].endswith("Z")
 
 
-# ---------------------------------------------------------------- 5. auth=None pin (ADR-015 deferral)
+# ---------------------------------------------------------------- 5. ADR-015 enablement — auth-block emission
 
 
 @pytest.mark.asyncio
-async def test_dispatch_payload_auth_is_null_pending_adr_015(
+async def test_dispatch_payload_auth_is_null_for_credential_less_project(
     web_scan, db_session, fake_redis
 ):
-    """Negative regression pin. ``payload.auth`` is intentionally None
-    until ADR-015 enables decrypted-credential transit. Don't 'helpfully'
-    populate this field without writing the ADR first."""
+    """ADR-015 enablement preserves the legacy ``auth: None`` path
+    for credential-less projects (the ``web_scan`` fixture creates
+    no ProjectCredential). Replaces the historical
+    ``test_dispatch_payload_auth_is_null_pending_adr_015`` regression
+    pin, which prevented premature implementation pre-ADR-015 landing.
+    """
     s = web_scan
     orch = ScanOrchestrator(db_session, fake_redis)
     await orch.dispatch(s["scan"], s["identity"])
     item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
     payload = json.loads(item[1])
     assert payload["auth"] is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_payload_auth_emits_decrypted_credential_when_present(
+    web_scan, db_session, fake_redis
+):
+    """ADR-015 enablement: when a ProjectCredential exists for the
+    scan's project, orchestrator decrypts + emits the credential in
+    ``payload["auth"]`` per SPEC §13 ADR-015. Q3 (a) discriminator
+    translation: DB ``auth_type`` → wire ``type``."""
+    s = web_scan
+    credential = ProjectCredential(
+        organization_id=s["org"].id,
+        project_id=s["project"].id,
+        auth_type="cookie",
+        encrypted_data=encrypt_credential({"data": "session=test123"}),
+    )
+    db_session.add(credential)
+    await db_session.commit()
+
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+
+    item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+    payload = json.loads(item[1])
+    assert payload["auth"] is not None
+    assert payload["auth"]["type"] == "cookie"
+    assert payload["auth"]["data"] == "session=test123"
+    assert "fields" not in payload["auth"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_payload_auth_emits_form_credential_with_fields(
+    web_scan, db_session, fake_redis
+):
+    """ADR-015 enablement: form-type credentials carry ``fields``
+    map alongside ``data`` per design doc §3.1 + ADR-015 §13
+    AuthType coverage."""
+    s = web_scan
+    credential = ProjectCredential(
+        organization_id=s["org"].id,
+        project_id=s["project"].id,
+        auth_type="form",
+        encrypted_data=encrypt_credential(
+            {
+                "data": "https://example.com/login",
+                "fields": {"username": "admin", "password": "test"},
+            }
+        ),
+    )
+    db_session.add(credential)
+    await db_session.commit()
+
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+
+    item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+    payload = json.loads(item[1])
+    assert payload["auth"]["type"] == "form"
+    assert payload["auth"]["fields"] == {"username": "admin", "password": "test"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_emits_credential_access_audit_row(
+    web_scan, db_session, fake_redis
+):
+    """ADR-015 enablement Q6 (a): orchestrator emits one
+    ``SCAN_CREDENTIAL_DECRYPTED`` AuditLog row per credential-bearing
+    dispatch (scan-level audit, NOT per-job per ScanAction policy)."""
+    s = web_scan
+    credential = ProjectCredential(
+        organization_id=s["org"].id,
+        project_id=s["project"].id,
+        auth_type="cookie",
+        encrypted_data=encrypt_credential({"data": "session=audit"}),
+    )
+    db_session.add(credential)
+    await db_session.commit()
+
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+
+    audit_rows = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_CREDENTIAL_DECRYPTED.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalars().all()
+    assert len(audit_rows) == 1, "exactly one SCAN_CREDENTIAL_DECRYPTED row per dispatch"
+    row = audit_rows[0]
+    assert row.details["credential_id"] == str(credential.id)
+    assert row.details["credential_auth_type"] == "cookie"
+    assert row.actor_id == s["user"].id
 
 
 # ---------------------------------------------------------------- 6. PUBLIC scan type rejected
