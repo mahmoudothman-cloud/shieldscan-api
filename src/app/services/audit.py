@@ -124,6 +124,9 @@ class ScanAction(str, PyEnum):
     # === emitted in M5+ (ADR-015 enablement) ===
     SCAN_CREDENTIAL_DECRYPTED = "scan.credential_decrypted"  # ADR-015 enablement; one row per credential-bearing dispatch
 
+    # === emitted in M5+ (MobSF R2 pre-signed URL task) ===
+    SCAN_PRESIGNED_URL_GENERATED = "scan.presigned_url_generated"  # MobSF R2 task; one row per mobile-scan-dispatch consuming pre-signed R2 URL
+
     # === reserved — declared early to freeze values for M5+ ===
     SCAN_JOB_RETRIED = "scan.job.retried"  # M5+ worker retry policy
 

@@ -49,6 +49,32 @@ def get_r2_client():
     )
 
 
+async def generate_presigned_get_url(r2_key: str, expiry: int = 600) -> str:
+    """Generate a pre-signed R2 GetObject URL for worker-side binary fetch.
+
+    Per MobSF R2 pre-signed URL task (shieldscan-docs commits b25e9ba
+    design + 721f788 plan + 8f71b01 SPEC ADR-013/ADR-014 addendums):
+    orchestrator-as-sole-writer-of-time-bounded-access-tokens pattern
+    (analog to ADR-015 credential decryption). Engine workers consume
+    the returned URL via plain HTTP GET (no R2 credentials required
+    worker-side per Q3 (a) preference path).
+
+    Q2 (a) lock: default 600s expiry (10x BullMQ queue-residence buffer;
+    bounded stolen-URL exposure window; aligns with ADR-015 ephemeral-
+    access-token discipline). Y-PRESIGN-METHOD (a) lock: boto3 sync-
+    wrapped via ``asyncio.to_thread`` mirrors existing ``put_object``
+    pattern at this module; zero new dependencies (boto3
+    ``generate_presigned_url`` is built-in).
+    """
+    client = get_r2_client()
+    return await asyncio.to_thread(
+        client.generate_presigned_url,
+        "get_object",
+        Params={"Bucket": settings.R2_BUCKET, "Key": r2_key},
+        ExpiresIn=expiry,
+    )
+
+
 async def put_object(key: str, content: bytes, content_type: str) -> None:
     """Upload ``content`` to ``settings.R2_BUCKET`` under ``key``.
 

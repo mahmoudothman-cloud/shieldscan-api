@@ -240,6 +240,75 @@ async def test_dispatch_mobile_creates_one_mobsf_job_with_mobile_config(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_mobile_emits_signed_fetch_url_alongside_upload_ref(
+    mobile_scan, db_session, fake_redis, monkeypatch
+):
+    """MobSF R2 pre-signed URL task: Q1 (β) sibling-field decision —
+    orchestrator emits both ``upload_ref`` (legacy r2://) AND
+    ``signed_fetch_url`` (pre-signed HTTPS URL) during migration window
+    per ADR-013 Pre-Signed URL Extension addendum at 8f71b01."""
+    from app.services import r2 as r2_module
+
+    fake_signed = "https://example.r2.cloudflarestorage.com/signed?X-Amz-Sig=deadbeef"
+
+    async def fake_generate(r2_key: str, expiry: int = 600) -> str:
+        # Echo the inputs into the returned URL for assertion.
+        return f"{fake_signed}&key={r2_key}&exp={expiry}"
+
+    monkeypatch.setattr(r2_module, "generate_presigned_get_url", fake_generate)
+    # Patch the orchestrator's imported reference too (module-level alias).
+    from app.services import orchestrator as orch_module
+    monkeypatch.setattr(orch_module, "generate_presigned_get_url", fake_generate)
+
+    s = mobile_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+
+    item = await fake_redis.brpop("shieldscan:queue:high", timeout=1)
+    payload = json.loads(item[1])
+    # Q1 (β) sibling-field: BOTH fields populated during migration.
+    assert payload["mobile_config"]["upload_ref"].startswith("r2://")
+    assert payload["mobile_config"]["signed_fetch_url"].startswith("https://")
+    assert s["upload"].r2_key in payload["mobile_config"]["signed_fetch_url"]
+    # Q2 (a) 600s default expiry passed through.
+    assert "exp=600" in payload["mobile_config"]["signed_fetch_url"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_emits_presigned_url_generated_audit_row(
+    mobile_scan, db_session, fake_redis, monkeypatch
+):
+    """MobSF R2 pre-signed URL task Q5 (a): orchestrator emits
+    ``SCAN_PRESIGNED_URL_GENERATED`` AuditLog row at URL-generation-time
+    (analog to ADR-015 ``SCAN_CREDENTIAL_DECRYPTED`` forensics posture).
+    ScanAction policy: scan-level only, NOT per-job."""
+    from app.services import orchestrator as orch_module
+
+    async def fake_generate(r2_key: str, expiry: int = 600) -> str:
+        return f"https://example.r2/signed?k={r2_key}"
+
+    monkeypatch.setattr(orch_module, "generate_presigned_get_url", fake_generate)
+
+    s = mobile_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+
+    audit_rows = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_PRESIGNED_URL_GENERATED.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalars().all()
+    assert len(audit_rows) == 1, "exactly one SCAN_PRESIGNED_URL_GENERATED row per mobile dispatch"
+    row = audit_rows[0]
+    assert row.details["r2_key"] == s["upload"].r2_key
+    assert row.details["expiry_seconds"] == 600
+    assert row.actor_id == s["user"].id
+
+
+@pytest.mark.asyncio
 async def test_dispatch_mobile_analysis_type_defaults_to_static(
     mobile_scan, db_session, fake_redis
 ):

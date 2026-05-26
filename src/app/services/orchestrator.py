@@ -52,6 +52,7 @@ from app.models.projects import ProjectCredential
 from app.models.scans import Scan, ScanJob, ScanType
 from app.services.audit import ScanAction, audit
 from app.services.credentials import decrypt_credential
+from app.services.r2 import generate_presigned_get_url
 from app.services.scan_queue import ScanQueue
 
 logger = logging.getLogger(__name__)
@@ -287,6 +288,53 @@ class ScanOrchestrator:
                 },  # type: ignore[arg-type]
             )
 
+        # 3c. MobSF R2 pre-signed URL task — mobile_config lookup +
+        #     URL generation + audit. Single-lookup + single-URL +
+        #     single-audit per dispatch (ScanAction policy: scan-level
+        #     only, never per-job; mirrors Drift #42 emission-site
+        #     refactor from ADR-015 enablement; mirrors Q1 (β)
+        #     sibling-field decision: emit both upload_ref +
+        #     signed_fetch_url during migration window per ADR-013
+        #     Pre-Signed URL Extension addendum at 8f71b01).
+        mobile_payload: dict | None = None
+        if scan.scan_type == ScanType.MOBILE and scan.mobile_upload_id is not None:
+            upload = await self.db.get(MobileUpload, scan.mobile_upload_id)
+            if upload is not None:
+                # Q2 (a) 600s default expiry per R2 design doc b25e9ba §3.2.
+                signed_url = await generate_presigned_get_url(
+                    r2_key=upload.r2_key, expiry=600
+                )
+                mobile_payload = {
+                    "upload_ref": f"r2://{upload.r2_key}",
+                    "signed_fetch_url": signed_url,
+                    "platform": upload.platform.value,
+                    # Default flipped from "both" to "static" per Task 7.4
+                    # D-PLAN-7 Path (c) — engine-side MobSF consumer ships
+                    # v1 STATIC only; dynamic + source-tree analysis are
+                    # forward-pinned. Overrideable via scan.config when v2
+                    # lands.
+                    "analysis_type": (scan.config or {}).get(
+                        "analysis_type", "static"
+                    ),
+                }
+                # Q5 (a) SCAN_PRESIGNED_URL_GENERATED audit per R2 design
+                # doc b25e9ba §3.5 (analog to ADR-015 SCAN_CREDENTIAL_
+                # DECRYPTED forensics posture).
+                await audit(
+                    self.db,
+                    organization_id=scan.organization_id,
+                    actor_id=actor_id,
+                    action=ScanAction.SCAN_PRESIGNED_URL_GENERATED,
+                    resource_type="scan",
+                    resource_id=scan.id,
+                    ip_address=request_ip,
+                    user_agent=user_agent,
+                    details={
+                        "r2_key": upload.r2_key,
+                        "expiry_seconds": 600,
+                    },  # type: ignore[arg-type]
+                )
+
         # 4. COMMIT — H.3 ordering. After this, DB state is durable.
         await self.db.commit()
 
@@ -295,7 +343,9 @@ class ScanOrchestrator:
         #    will surface and recover them. Visible failure > silent
         #    failure (DRIFT-LOG H.3 entry).
         for job in jobs:
-            payload = await self._build_job_payload(scan, job, auth_payload)
+            payload = await self._build_job_payload(
+                scan, job, auth_payload, mobile_payload
+            )
             await self.queue.dispatch(priority.value, payload)
 
         return jobs
@@ -305,6 +355,7 @@ class ScanOrchestrator:
         scan: Scan,
         job: ScanJob,
         auth_payload: dict | None,
+        mobile_payload: dict | None,
     ) -> dict:
         """Construct the SPEC §7.1 job-dispatch payload.
 
@@ -314,10 +365,16 @@ class ScanOrchestrator:
         ``None`` is the canonical credential-less-project value
         (legacy null path preserved).
 
+        ``mobile_payload`` is the pre-built MobSF mobile-config dict
+        (or None) constructed once per dispatch in ``dispatch()`` per
+        MobSF R2 pre-signed URL task; includes both ``upload_ref``
+        (legacy r2:// reference) + ``signed_fetch_url`` (Q1 (β)
+        sibling-field per ADR-013 Pre-Signed URL Extension addendum).
+
         ``callback_stream`` (renamed from plan-literal ``callback_channel``)
         reflects the ADR-014 vocabulary shift to Redis Streams.
         """
-        payload: dict = {
+        return {
             "id": str(job.id),
             "scan_id": str(scan.id),
             "organization_id": str(scan.organization_id),
@@ -330,26 +387,9 @@ class ScanOrchestrator:
             },
             "auth": auth_payload,
             "config": dict(scan.config or {}),
-            "mobile_config": None,
+            "mobile_config": mobile_payload,
             "callback_stream": f"shieldscan:progress:{scan.id}",
             "created_at": (
                 datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             ),
         }
-
-        if scan.scan_type == ScanType.MOBILE and scan.mobile_upload_id is not None:
-            upload = await self.db.get(MobileUpload, scan.mobile_upload_id)
-            if upload is not None:
-                payload["mobile_config"] = {
-                    "upload_ref": f"r2://{upload.r2_key}",
-                    "platform": upload.platform.value,
-                    # Default flipped from "both" to "static" per Task 7.4
-                    # D-PLAN-7 Path (c) — engine-side MobSF consumer ships
-                    # v1 STATIC only; dynamic + source-tree analysis are
-                    # forward-pinned. Overrideable via scan.config when v2
-                    # lands. Cross-reference: shieldscan-engine commit (TBD;
-                    # Task 7.4 Phase 4 atomic).
-                    "analysis_type": (scan.config or {}).get("analysis_type", "static"),
-                }
-
-        return payload
