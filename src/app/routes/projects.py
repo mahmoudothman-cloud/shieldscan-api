@@ -54,8 +54,12 @@ from app.schemas.credentials import (
     CredentialRequest,
     CredentialResponse,
 )
-from app.services.audit import ProjectAction, audit
+from app.models.scans import ScanStatus
+from app.redis_client import get_redis
+from app.services.audit import ProjectAction, ScanAction, audit
 from app.services.credentials import encrypt_credential
+from app.services.projects import find_in_flight_scans_by_project
+from app.services.scan_queue import CancelPublisher
 from app.schemas.projects import (
     PaginatedProjectsResponse,
     PaginationMeta,
@@ -568,14 +572,45 @@ async def delete_project_credentials(
     request: Request,
     identity: AuthIdentity = Depends(require_admin_or_api_key),
     db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis),
 ):
-    """Clear the project's credential. 204 on success, even if no
+    """Revoke the project's credential. 204 on success, even if no
     credential existed (idempotent). Archived project → 409.
 
-    Audit ``project.credential.deleted`` is emitted only when a row
-    was actually removed — calling DELETE on a project with no
-    credential is a no-op and skips the audit row (matches the
-    audit discipline of "events for things that happened").
+    Credential Revocation Flow task (2026-05-28) — extends prior
+    "clear credential" semantics with cascade-cancel of in-flight
+    scans per SPEC §13 ADR-015 Addendum: Credential Lifecycle
+    Extension. Endpoint semantics: revoke (= remove credential +
+    cascade-cancel in-flight scans). Idempotency preserved: silent
+    204 when no credential existed (no audit emission per
+    Y-IDEMPOTENCY-SEMANTICS a default; existing pattern).
+
+    Audit emission order (Y-AUDIT-EMISSION-ORDER a default per plan
+    fdad021 §3.3):
+      1. ``project.credential.revoked`` (NEW; Q6 b) — revoke-action
+         precedes delete-effect
+      2. ProjectCredential row hard-deleted (Q2 γ; per-project UNIQUE
+         invariant preserved without partial-index relaxation)
+      3. ``project.credential.deleted`` (existing; preserved for
+         backward-compat)
+      4. Cascade-cancel loop per Q4 a: for each in-flight scan, flip
+         PG state → CANCELED + emit ``scan.canceled`` audit (Task 4.5
+         reuse) + ``CancelPublisher.publish_cancel`` (Pub/Sub signal)
+
+    Engine-side handling per Q1 (b) axis 4 + Q5 (a) ZERO scope: the
+    engine cancel-watcher (V-FG; ``processor.go:181-322`` per-job
+    ``jobCtx`` + ``spawnCancelWatcher`` + ``ctx.Done`` + 3
+    goleak-clean exit paths per ADR-021 Rule 2) handles
+    credential-revocation-cancel identically to user-initiated
+    cancel — no event-payload distinction needed.
+
+    Drift #51 (catalogued): plan §3.4 said "invoke existing
+    ``cancel_scan(...)`` per scan"; empirically ``cancel_scan`` is a
+    FastAPI route handler with Request/identity/redis deps, not
+    directly callable. Resolution: inline equivalent logic in
+    cascade loop (state flip + ``SCAN_CANCELED`` audit +
+    ``CancelPublisher.publish_cancel``); preserves "Task 4.5 audit +
+    Publisher infrastructure reused 1:1" claim conceptually.
     """
     project = await _load_project(db, org_id, project_id)
     if project is None:
@@ -591,11 +626,31 @@ async def delete_project_credentials(
         )
     ).scalar_one_or_none()
     if cred is None:
-        # Nothing to delete — return 204 without an audit row.
+        # Nothing to revoke — return 204 without an audit row
+        # (Y-IDEMPOTENCY-SEMANTICS a; existing pattern preserved).
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    await db.delete(cred)
     actor_id = identity.user.id if identity.user is not None else None
+    ip_address = get_real_ip(request)
+    user_agent = request.headers.get("User-Agent")
+
+    # Step 1: PROJECT_CREDENTIAL_REVOKED audit (Q6 b; Y-AUDIT-EMISSION-ORDER a).
+    await audit(
+        db,
+        organization_id=org_id,
+        actor_id=actor_id,
+        action=ProjectAction.PROJECT_CREDENTIAL_REVOKED,
+        resource_type="project",
+        resource_id=project_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details={"auth_type": cred.auth_type},  # type: ignore[typeddict-unknown-key]
+    )
+
+    # Step 2: hard-delete ProjectCredential row (Q2 γ).
+    await db.delete(cred)
+
+    # Step 3: PROJECT_CREDENTIAL_DELETED audit (existing; backward-compat).
     await audit(
         db,
         organization_id=org_id,
@@ -603,8 +658,55 @@ async def delete_project_credentials(
         action=ProjectAction.PROJECT_CREDENTIAL_DELETED,
         resource_type="project",
         resource_id=project_id,
-        ip_address=get_real_ip(request),
-        user_agent=request.headers.get("User-Agent"),
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
+
+    # Step 4: cascade-cancel in-flight scans (Q4 a fan-out).
+    # Note: cancel-targets are discovered BEFORE commit so the
+    # credential delete + cascade-cancel-state-flips ship in one
+    # atomic transaction (commit-then-publish ordering matches
+    # Task 4.5 cancel_scan).
+    in_flight = await find_in_flight_scans_by_project(db, project_id)
+    cascade_signals: list[str] = []
+    for scan in in_flight:
+        previous_status = scan.status
+        scan.status = ScanStatus.CANCELED
+        await audit(
+            db,
+            organization_id=scan.organization_id,
+            actor_id=actor_id,
+            action=ScanAction.SCAN_CANCELED,
+            resource_type="scan",
+            resource_id=scan.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            details={  # type: ignore[arg-type]
+                "scan_type": scan.scan_type.value,
+                "previous_status": previous_status.value,
+                "reason": "credential_revoked",
+            },
+        )
+        cascade_signals.append(str(scan.id))
+
     await db.commit()
+
+    # Step 5: publish cancel signals post-commit (Task 4.5 ordering;
+    # fire-and-forget — durable PG state is the source of truth).
+    if cascade_signals:
+        cancel_publisher = CancelPublisher(redis)
+        for scan_id in cascade_signals:
+            try:
+                await cancel_publisher.publish_cancel(
+                    scan_id, reason="credential_revoked"
+                )
+            except Exception:
+                logger.exception(
+                    "cascade cancel publish failed for scan_id=%s; "
+                    "PG state already CANCELED, will surface as "
+                    "ghost-canceled if workers running",
+                    scan_id,
+                )
+                # Don't raise — visible-failure mode per Task 4.5.
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)

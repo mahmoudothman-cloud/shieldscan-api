@@ -96,6 +96,11 @@ class ProjectAction(str, PyEnum):
     # === emitted starting in Task 3.X ===
     PROJECT_CREDENTIAL_SET = "project.credential.set"
     PROJECT_CREDENTIAL_DELETED = "project.credential.deleted"
+    # === emitted starting in Credential Revocation Flow task (2026-05-28) ===
+    # Per SPEC §13 ADR-015 Addendum: Credential Lifecycle Extension.
+    # Emitted at revoke-action (BEFORE delete); cascade-canceled scans
+    # emit existing ScanAction.SCAN_CANCELED per Task 4.5 reuse (Q6 b).
+    PROJECT_CREDENTIAL_REVOKED = "project.credential.revoked"
 
 
 class ScanAction(str, PyEnum):

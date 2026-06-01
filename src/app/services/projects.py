@@ -14,8 +14,13 @@ fetches+caches it on first use. For air-gapped on-prem deployments
 from __future__ import annotations
 
 from urllib.parse import urlparse
+from uuid import UUID
 
 import tldextract
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.scans import Scan, ScanStatus
 
 
 # Single TLDExtract instance — internally caches the PSL. Constructed
@@ -55,3 +60,43 @@ def extract_root_domain(target_url: str) -> str:
     # `domain` is the registrable label, `suffix` is the public-suffix
     # (potentially multi-part like `co.uk`).
     return f"{extracted.domain}.{extracted.suffix}"
+
+
+# ============================================================ in-flight scans
+#
+# Credential Revocation Flow task (2026-05-28) — per Q4 (a) orchestrator-
+# side fan-out + SPEC §13 ADR-015 Addendum: Credential Lifecycle Extension.
+# Y-FILE-LOCATION (b) resolution: project-domain co-location (default (a)
+# orchestrator.py rejected at execution — ScanOrchestrator is class-based;
+# no module-level find_*-style convention there). Drift #52 catalogued.
+
+_ACTIVE_SCAN_STATUSES: tuple[ScanStatus, ...] = (
+    ScanStatus.QUEUED,
+    ScanStatus.RECONNING,
+    ScanStatus.RUNNING,
+    ScanStatus.ANALYZING,
+)
+
+
+async def find_in_flight_scans_by_project(
+    db: AsyncSession, project_id: UUID,
+) -> list[Scan]:
+    """Find all scans in active (non-terminal) states for a project.
+
+    Active states per ``ScanStatus`` state machine: QUEUED, RECONNING,
+    RUNNING, ANALYZING. Excludes terminal states: COMPLETED, PARTIAL,
+    FAILED, CANCELED.
+
+    Used by the credential revocation flow (Q4 a fan-out target): the
+    DELETE ``/orgs/.../credentials`` endpoint loops this result and
+    cascade-cancels each scan (PG state flip → ``CANCELED`` +
+    ``SCAN_CANCELED`` audit + ``CancelPublisher.publish_cancel``)
+    inline (Task 4.5 cancel_scan route handler is not reusable as a
+    plain function — Drift #51 catalogued).
+    """
+    stmt = select(Scan).where(
+        Scan.project_id == project_id,
+        Scan.status.in_(_ACTIVE_SCAN_STATUSES),
+    )
+    result = await db.scalars(stmt)
+    return list(result.all())

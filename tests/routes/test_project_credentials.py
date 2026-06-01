@@ -48,6 +48,7 @@ from app.config import settings
 from app.models.audit import AuditLog
 from app.models.identity import APIKey, Membership, MembershipRole, Organization, User
 from app.models.projects import Project, ProjectCredential
+from app.models.scans import Scan, ScanStatus, ScanType
 from app.services.api_keys import generate_api_key
 from app.services.auth import create_access_token, hash_password
 from tests.conftest import use_org
@@ -518,3 +519,225 @@ async def test_delete_archived_project_returns_409(project_setup, client, db_ses
     r = await client.delete(_url(s), headers=s["admin_headers"])
     assert r.status_code == 409
     assert r.json()["detail"] == "project_archived"
+
+
+# ============================================================
+# Credential Revocation Flow task (2026-05-28)
+# ============================================================
+#
+# 4 tests pinning the revoke + cascade-cancel semantics per SPEC §13
+# ADR-015 Addendum: Credential Lifecycle Extension. See design doc
+# shieldscan-docs `0e55a4f` + plan `fdad021` + Stage 3 Commit 1
+# `291ded3`.
+#
+# Y-AUDIT-EMISSION-ORDER (a): REVOKED → delete → DELETED → cascade.
+# Y-IDEMPOTENCY-SEMANTICS (a): silent 204 when no credential.
+# Drift #51: cancel_scan route handler not directly reusable;
+# inline-equivalent logic in cascade loop.
+
+
+async def _make_scan(db_session, org_id, project_id, status=ScanStatus.QUEUED):
+    """Helper: create a scan in a given state for cascade-cancel tests."""
+    scan = Scan(
+        organization_id=org_id,
+        project_id=project_id,
+        scan_type=ScanType.FULL_WEB,
+        status=status,
+        priority="normal",
+        config={"depth": "standard"},
+    )
+    db_session.add(scan)
+    await db_session.commit()
+    await db_session.refresh(scan)
+    return scan
+
+
+# ---------------------------------------------------------------- 18. revoke emits PROJECT_CREDENTIAL_REVOKED
+
+
+@pytest.mark.asyncio
+async def test_delete_credential_emits_revoked_audit(project_setup, client, db_session):
+    """DELETE emits PROJECT_CREDENTIAL_REVOKED BEFORE the existing
+    PROJECT_CREDENTIAL_DELETED audit (Y-AUDIT-EMISSION-ORDER a).
+    Both audits land in the same transaction; ordering matters for
+    forensic-chain reconstruction (revoke-action precedes
+    delete-effect).
+    """
+    s = project_setup
+    # Set credential first.
+    r0 = await client.patch(
+        _url(s),
+        json={"auth_type": "basic", "username": "u", "password": "p"},
+        headers=s["admin_headers"],
+    )
+    assert r0.status_code == 200
+
+    # Revoke.
+    r = await client.delete(_url(s), headers=s["admin_headers"])
+    assert r.status_code == 204
+
+    # Both audits emitted, in order.
+    audits = (
+        await db_session.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.action.in_(
+                    ["project.credential.revoked", "project.credential.deleted"]
+                )
+            )
+            .order_by(AuditLog.created_at)
+        )
+    ).scalars().all()
+    assert len(audits) == 2
+    assert audits[0].action == "project.credential.revoked"
+    assert audits[1].action == "project.credential.deleted"
+    assert audits[0].actor_id == s["admin"].id
+    assert audits[1].actor_id == s["admin"].id
+    # Revoked audit captures auth_type for forensic context.
+    assert audits[0].details == {"auth_type": "basic"}
+
+
+# ---------------------------------------------------------------- 19. cascade-cancel in-flight scan
+
+
+@pytest.mark.asyncio
+async def test_delete_credential_cascades_in_flight_scan_cancel(
+    project_setup, client, db_session
+):
+    """In-flight scans for the project are cascade-canceled when the
+    credential is revoked (Q4 a fan-out via
+    find_in_flight_scans_by_project; SCAN_CANCELED audit + state flip
+    per Task 4.5-equivalent inline logic). Verifies axis 1+2+3 v1
+    scope of the revocation lifecycle.
+    """
+    s = project_setup
+    # Set credential.
+    r0 = await client.patch(
+        _url(s),
+        json={"auth_type": "basic", "username": "u", "password": "p"},
+        headers=s["admin_headers"],
+    )
+    assert r0.status_code == 200
+
+    # Fixture an in-flight scan for this project.
+    scan = await _make_scan(
+        db_session, s["org"].id, s["project"].id, status=ScanStatus.RUNNING
+    )
+    scan_id = scan.id
+
+    # Revoke credential — should cascade-cancel the scan.
+    r = await client.delete(_url(s), headers=s["admin_headers"])
+    assert r.status_code == 204
+
+    # Scan transitioned to CANCELED.
+    db_session.expire_all()
+    refreshed = (
+        await db_session.execute(select(Scan).where(Scan.id == scan_id))
+    ).scalar_one()
+    assert refreshed.status == ScanStatus.CANCELED
+
+    # SCAN_CANCELED audit row emitted with credential_revoked reason.
+    cancel_audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "scan.canceled")
+        )
+    ).scalars().all()
+    assert len(cancel_audits) == 1
+    assert cancel_audits[0].resource_id == scan_id
+    assert cancel_audits[0].details is not None
+    assert cancel_audits[0].details.get("reason") == "credential_revoked"
+    assert cancel_audits[0].details.get("previous_status") == "running"
+
+
+# ---------------------------------------------------------------- 20. idempotency: silent 204 on absent credential
+
+
+@pytest.mark.asyncio
+async def test_delete_credential_idempotency_silent_204(
+    project_setup, client, db_session
+):
+    """DELETE on a project with no credential returns 204 silently:
+    NO audit rows emitted (Y-IDEMPOTENCY-SEMANTICS a; preserves
+    existing pattern). No cascade-cancel either.
+    """
+    s = project_setup
+    # No credential ever set.
+
+    r = await client.delete(_url(s), headers=s["admin_headers"])
+    assert r.status_code == 204
+
+    # Zero audit rows in credential/scan domain.
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action.in_(
+                    [
+                        "project.credential.revoked",
+                        "project.credential.deleted",
+                        "scan.canceled",
+                    ]
+                )
+            )
+        )
+    ).scalars().all()
+    assert audits == []
+
+
+# ---------------------------------------------------------------- 21. no in-flight scans → no cascade audits
+
+
+@pytest.mark.asyncio
+async def test_delete_credential_no_in_flight_scans_no_cascade(
+    project_setup, client, db_session
+):
+    """Revoking a credential when no scans are in-flight (only
+    terminal-state scans exist) emits ONLY the credential audits —
+    no cascade SCAN_CANCELED rows. Terminal scans are not touched.
+    """
+    s = project_setup
+    # Set credential.
+    r0 = await client.patch(
+        _url(s),
+        json={"auth_type": "basic", "username": "u", "password": "p"},
+        headers=s["admin_headers"],
+    )
+    assert r0.status_code == 200
+
+    # Fixture a terminal-state scan (COMPLETED) — must NOT be
+    # cascade-canceled per V-FE active-vs-terminal partition.
+    terminal_scan = await _make_scan(
+        db_session, s["org"].id, s["project"].id, status=ScanStatus.COMPLETED
+    )
+    terminal_scan_id = terminal_scan.id
+
+    # Revoke.
+    r = await client.delete(_url(s), headers=s["admin_headers"])
+    assert r.status_code == 204
+
+    # Terminal scan untouched.
+    db_session.expire_all()
+    refreshed = (
+        await db_session.execute(
+            select(Scan).where(Scan.id == terminal_scan_id)
+        )
+    ).scalar_one()
+    assert refreshed.status == ScanStatus.COMPLETED
+
+    # Credential audits emitted; ZERO scan.canceled rows.
+    cred_audits = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action.in_(
+                    ["project.credential.revoked", "project.credential.deleted"]
+                )
+            )
+        )
+    ).scalars().all()
+    assert len(cred_audits) == 2
+
+    cancel_audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "scan.canceled")
+        )
+    ).scalars().all()
+    assert cancel_audits == []
