@@ -74,7 +74,12 @@ from app.schemas.scan_compare import (
 from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
 from app.services.scan_compare import compute_diff
-from app.services.scan_queue import CancelPublisher, ProgressSubscriber
+from app.services.scan_queue import (
+    CancelPublisher,
+    ProgressSubscriber,
+    apply_cancel_state,
+    publish_cancel_signal,
+)
 
 # SSE: sse-starlette EventSourceResponse — version 2.4.1+. ping=15s
 # heartbeat keeps connection alive under proxy idle timeouts
@@ -298,48 +303,29 @@ async def cancel_scan(
     if scan.status in _TERMINAL_FINAL:
         raise _SCAN_ALREADY_TERMINAL
 
-    previous_status = scan.status
-    scan.status = ScanStatus.CANCELED  # no-op if already CANCELED
-
     actor_id = identity.user.id if identity.user is not None else None
-    details: dict = {
-        "scan_type": scan.scan_type.value,
-        "previous_status": previous_status.value,
-        "reason": "user_requested",
-    }
-    if identity.api_key is not None:
-        details["api_key_prefix"] = identity.api_key.key_prefix
+    api_key_prefix = (
+        identity.api_key.key_prefix if identity.api_key is not None else None
+    )
 
-    await audit(
+    # Shared kernel: flip state + emit SCAN_CANCELED audit (Drift #51
+    # rule-of-three extraction at services/scan_queue.py).
+    await apply_cancel_state(
         db,
-        organization_id=scan.organization_id,
+        scan,
         actor_id=actor_id,
-        action=ScanAction.SCAN_CANCELED,
-        resource_type="scan",
-        resource_id=scan.id,
+        reason="user_requested",
         ip_address=get_real_ip(request),
         user_agent=request.headers.get("User-Agent"),
-        details=details,  # type: ignore[arg-type]
+        api_key_prefix=api_key_prefix,
     )
     await db.commit()
 
-    # Publish cancel signal to Redis. Fire-and-forget; if this fails
-    # post-commit, the scan is canceled in PG (visible to user) but
-    # in-flight Go workers (M5+) won't receive the abort. Until M5
-    # ships the worker-side subscriber, this signal goes into the
-    # void anyway — see DRIFT-LOG.
-    cancel_publisher = CancelPublisher(redis)
-    try:
-        await cancel_publisher.publish_cancel(
-            str(scan_id), reason="user_requested"
-        )
-    except Exception:
-        logger.exception(
-            "cancel publish failed for scan_id=%s; PG state already "
-            "CANCELED, will surface as ghost-canceled if workers running",
-            scan_id,
-        )
-        # Don't raise — state is durable in PG; visible-failure mode.
+    # Publish cancel signal to Redis post-commit. Fire-and-forget per
+    # visible-failure discipline (durable PG state is source of truth).
+    await publish_cancel_signal(
+        redis, str(scan_id), reason="user_requested", logger=logger
+    )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

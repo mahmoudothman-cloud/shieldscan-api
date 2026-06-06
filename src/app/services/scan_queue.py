@@ -32,9 +32,15 @@ edit at the orchestrator boundary, not three.
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator, Final
+import logging
+from typing import Any, AsyncIterator, Final
+from uuid import UUID
 
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.scans import Scan, ScanStatus
+from app.services.audit import ScanAction, audit
 
 # Per-scan Stream key. Naming convention SHIFT (vs SPEC §7.2's
 # pre-ADR-014 "channel" wording): the key now refers to a Stream,
@@ -247,4 +253,90 @@ class CancelPublisher:
         }
         return await self.redis.publish(
             f"{_CANCEL_KEY_PREFIX}{scan_id}", json.dumps(event)
+        )
+
+
+# ============================================================ cancel helpers
+#
+# Drift #51 rule-of-three trigger (revocation P5.A `56b8fce`). Two
+# call-sites — Task 4.5 ``cancel_scan`` route handler at
+# ``routes/scans.py:246-340`` + credential-revocation cascade-loop
+# at ``routes/projects.py`` (post-`453a80b`) — share a clean state-
+# flip + audit kernel but legitimately diverge at three boundaries
+# (per V-GD diff analysis): reason string, ``api_key_prefix`` detail
+# asymmetry, and commit + publish timing (eager per-scan vs deferred-
+# batch atomic-with-credential-delete).
+#
+# Two thin helpers — NOT one coarse helper. Coarse-helper-with-flags
+# (``commit=False``/``publish=False``) was rejected as antipattern
+# (flag-driven helpers that change atomicity semantics tightly couple
+# callers to internal helper behavior masquerading as DRY). Callers
+# retain transaction-boundary + signal-emission timing.
+
+
+async def apply_cancel_state(
+    db: AsyncSession,
+    scan: Scan,
+    *,
+    actor_id: UUID | None,
+    reason: str,
+    ip_address: str | None,
+    user_agent: str | None,
+    api_key_prefix: str | None = None,
+) -> None:
+    """Flip ``scan.status`` to ``CANCELED`` + emit ``SCAN_CANCELED`` audit row.
+
+    Shared kernel between ``cancel_scan`` route handler + credential-
+    revocation cascade-loop. Does NOT commit DB or publish Redis
+    signal — callers own transaction boundary + signal-emission
+    timing per their atomicity needs (V-GD #3 divergence).
+
+    ``previous_status`` captured before the flip so the audit details
+    dict records the source state (audit-as-event-history discipline).
+    """
+    previous_status = scan.status
+    scan.status = ScanStatus.CANCELED
+    details: dict[str, Any] = {
+        "scan_type": scan.scan_type.value,
+        "previous_status": previous_status.value,
+        "reason": reason,
+    }
+    if api_key_prefix is not None:
+        details["api_key_prefix"] = api_key_prefix
+    await audit(
+        db,
+        organization_id=scan.organization_id,
+        actor_id=actor_id,
+        action=ScanAction.SCAN_CANCELED,
+        resource_type="scan",
+        resource_id=scan.id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        details=details,  # type: ignore[arg-type]
+    )
+
+
+async def publish_cancel_signal(
+    redis: Redis,
+    scan_id: str,
+    reason: str,
+    *,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Publish a Redis cancel signal with log-and-swallow error handling.
+
+    Shared between ``cancel_scan`` + cascade-loop publish-emission.
+    Fire-and-forget per visible-failure discipline (the scan is
+    CANCELED in PG either way — durable state is the source of truth;
+    a missed publish surfaces as a ghost-canceled scan if workers
+    are running, recoverable via M5+ janitor).
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    try:
+        publisher = CancelPublisher(redis)
+        await publisher.publish_cancel(scan_id, reason=reason)
+    except Exception:
+        logger.exception(
+            "publish_cancel failed scan_id=%s reason=%s", scan_id, reason
         )

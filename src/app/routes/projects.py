@@ -54,12 +54,11 @@ from app.schemas.credentials import (
     CredentialRequest,
     CredentialResponse,
 )
-from app.models.scans import ScanStatus
 from app.redis_client import get_redis
-from app.services.audit import ProjectAction, ScanAction, audit
+from app.services.audit import ProjectAction, audit
 from app.services.credentials import encrypt_credential
 from app.services.projects import find_in_flight_scans_by_project
-from app.services.scan_queue import CancelPublisher
+from app.services.scan_queue import apply_cancel_state, publish_cancel_signal
 from app.schemas.projects import (
     PaginatedProjectsResponse,
     PaginationMeta,
@@ -670,22 +669,17 @@ async def delete_project_credentials(
     in_flight = await find_in_flight_scans_by_project(db, project_id)
     cascade_signals: list[str] = []
     for scan in in_flight:
-        previous_status = scan.status
-        scan.status = ScanStatus.CANCELED
-        await audit(
+        # Shared kernel: flip state + emit SCAN_CANCELED audit (Drift
+        # #51 rule-of-three extraction at services/scan_queue.py).
+        # api_key_prefix=None per V-GD #2 (cascade caller does not
+        # surface identity.api_key granularity in details).
+        await apply_cancel_state(
             db,
-            organization_id=scan.organization_id,
+            scan,
             actor_id=actor_id,
-            action=ScanAction.SCAN_CANCELED,
-            resource_type="scan",
-            resource_id=scan.id,
+            reason="credential_revoked",
             ip_address=ip_address,
             user_agent=user_agent,
-            details={  # type: ignore[arg-type]
-                "scan_type": scan.scan_type.value,
-                "previous_status": previous_status.value,
-                "reason": "credential_revoked",
-            },
         )
         cascade_signals.append(str(scan.id))
 
@@ -693,20 +687,9 @@ async def delete_project_credentials(
 
     # Step 5: publish cancel signals post-commit (Task 4.5 ordering;
     # fire-and-forget — durable PG state is the source of truth).
-    if cascade_signals:
-        cancel_publisher = CancelPublisher(redis)
-        for scan_id in cascade_signals:
-            try:
-                await cancel_publisher.publish_cancel(
-                    scan_id, reason="credential_revoked"
-                )
-            except Exception:
-                logger.exception(
-                    "cascade cancel publish failed for scan_id=%s; "
-                    "PG state already CANCELED, will surface as "
-                    "ghost-canceled if workers running",
-                    scan_id,
-                )
-                # Don't raise — visible-failure mode per Task 4.5.
+    for scan_id in cascade_signals:
+        await publish_cancel_signal(
+            redis, scan_id, reason="credential_revoked", logger=logger
+        )
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
