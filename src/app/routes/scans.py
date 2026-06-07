@@ -114,6 +114,17 @@ _DOMAIN_NOT_VERIFIED = HTTPException(
 _SCAN_ALREADY_TERMINAL = HTTPException(
     status_code=409, detail="scan_already_terminal"
 )
+# Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25):
+# raised when a ScanType requires source acquisition but the bound
+# project has no ``source_repo_url`` configured. Repairs the Drift
+# #54 silent-no-op behavior at the request-validation layer per
+# Q-FAILURE-MODE hard-fail lock. Schema validator cannot do this
+# cross-field check (ScanCreateRequest has no Project reference);
+# enforcement lives at the route handler where Project is already
+# loaded.
+_SOURCE_REPO_URL_REQUIRED = HTTPException(
+    status_code=422, detail="source_repo_url_required"
+)
 
 
 # Active scan states — cancel is meaningful.
@@ -139,6 +150,17 @@ _TERMINAL_FINAL: frozenset[ScanStatus] = frozenset({
 _DOMAIN_VERIFY_BYPASS: frozenset[ScanType] = frozenset(
     {ScanType.MOBILE, ScanType.CONTAINER}
 )
+
+# Source-Ingestion Fix: ScanTypes that dispatch ``trivy-fs`` and
+# therefore require ``Project.source_repo_url`` to be set. Kept in
+# sync with ``services.orchestrator._SOURCE_REQUIRING_SCAN_TYPES``;
+# duplicated here to avoid a routes-side import of an orchestrator
+# private symbol. Single source of truth for the set membership is
+# the orchestrator constant.
+_SOURCE_REQUIRING_SCAN_TYPES: frozenset[ScanType] = frozenset({
+    ScanType.FULL_WEB_SOURCE,
+    ScanType.FULL_SPECTRUM,
+})
 
 
 @project_scans_router.post(
@@ -173,6 +195,19 @@ async def create_scan(
         and not project.domain_verified
     ):
         raise _DOMAIN_NOT_VERIFIED
+
+    # Step 4b: source-acquisition prerequisite gate per Source-Ingestion
+    # Fix (TOOL-ARCH §3.2 addendum 9d6ab25). ScanTypes that dispatch
+    # ``trivy-fs`` require ``Project.source_repo_url`` to be set
+    # because the engine clones at job-pickup time per Q-WIRE
+    # engine-clones lock; without a URL the dispatch would silently
+    # no-op (Drift #54). Q-FAILURE-MODE hard-fail at the request-
+    # validation layer.
+    if (
+        body.scan_type in _SOURCE_REQUIRING_SCAN_TYPES
+        and not project.source_repo_url
+    ):
+        raise _SOURCE_REPO_URL_REQUIRED
 
     # Step 5: mobile-upload validation (when applicable).
     if body.scan_type == ScanType.MOBILE:

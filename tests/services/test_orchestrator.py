@@ -208,6 +208,93 @@ async def test_dispatch_full_web_creates_8_jobs(web_scan, db_session, fake_redis
         queued.append(json.loads(item[1]))
     assert len(queued) == 8
     assert {q["engine"] for q in queued} == set(expected)
+    # Source-Ingestion Fix invariant: FULL_WEB does NOT thread
+    # source_repo_url into the wire target block (only the source-
+    # requiring set FULL_WEB_SOURCE + FULL_SPECTRUM does).
+    for q in queued:
+        assert "source_repo_url" not in q["target"]
+
+
+# ---------------------------------------------------------------- Source-Ingestion Fix: trivy-fs source threading
+#
+# Per TOOL-ARCH §3.2 addendum (shieldscan-docs 9d6ab25). FULL_WEB_SOURCE
+# and FULL_SPECTRUM dispatch ``trivy-fs`` (which clones source per
+# Q-WIRE engine-clones lock). Orchestrator must thread
+# ``Project.source_repo_url`` into the wire ``target`` block for these
+# ScanTypes; other ScanTypes must NOT carry the field. Drift #54
+# root-cause repair: column was orphaned since M1; this test pins the
+# new threading invariant.
+
+
+@pytest.mark.asyncio
+async def test_dispatch_threads_source_repo_url_for_full_web_source(
+    db_session, fake_redis
+):
+    """FULL_WEB_SOURCE threads scan.project.source_repo_url into the
+    dispatched payload's target block."""
+    org = Organization(name="SI Org", slug=f"si-{uuid4().hex[:8]}")
+    db_session.add(org)
+    await db_session.flush()
+    await use_org(db_session, org.id)
+
+    user = User(
+        email=f"si-{uuid4().hex[:6]}@t.co",
+        hashed_password=hash_password("SiPass-1"),
+        full_name="SI",
+        email_verified=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN)
+    )
+
+    project = Project(
+        organization_id=org.id,
+        name="SrcApp",
+        target_url="https://src.example.com",
+        root_domain="example.com",
+        domain_verified=True,
+        source_repo_url="https://github.com/OWASP/NodeGoat.git",
+    )
+    db_session.add(project)
+    await db_session.flush()
+
+    scan = Scan(
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=ScanType.FULL_WEB_SOURCE,
+        status=ScanStatus.QUEUED,
+        priority="normal",
+        config={"depth": "standard"},
+    )
+    db_session.add(scan)
+    await db_session.commit()
+    await db_session.refresh(scan)
+    scan.project = project  # type: ignore[attr-defined]
+
+    identity = AuthIdentity(
+        kind="jwt",
+        organization_id=org.id,
+        user=user,
+        role=MembershipRole.ADMIN,
+    )
+    orch = ScanOrchestrator(db_session, fake_redis)
+    jobs = await orch.dispatch(scan, identity)
+    assert len(jobs) == len(SCAN_TYPE_TOOLS[ScanType.FULL_WEB_SOURCE])
+
+    # Drain every queued payload + assert source_repo_url present on
+    # every job's target block.
+    queued = []
+    for _ in range(len(jobs)):
+        item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+        assert item is not None
+        queued.append(json.loads(item[1]))
+    assert all(
+        q["target"].get("source_repo_url")
+        == "https://github.com/OWASP/NodeGoat.git"
+        for q in queued
+    ), [q["target"] for q in queued]
 
 
 # ---------------------------------------------------------------- 2. mobile branch

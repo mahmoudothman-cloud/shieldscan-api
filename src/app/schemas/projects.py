@@ -51,6 +51,21 @@ class ProjectCreateRequest(BaseModel):
     def _validate_target_url(cls, v: str) -> str:
         return _validate_https_url(v)
 
+    @field_validator("source_repo_url")
+    @classmethod
+    def _validate_source_repo_url(cls, v: str | None) -> str | None:
+        # Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25):
+        # HTTPS-scheme-only at v1 per Q-AUTH + Q-VALIDATOR locks.
+        # SSH-key + private-token auth forward-pinned per Q-AUTH.
+        if v is None:
+            return None
+        parsed = urlparse(v)
+        if parsed.scheme != "https":
+            raise ValueError("source_repo_url must use https://")
+        if not parsed.hostname:
+            raise ValueError("source_repo_url must include a hostname")
+        return v
+
 
 class ProjectUpdateRequest(BaseModel):
     """``PATCH /v1/orgs/{org_id}/projects/{id}`` body.
@@ -79,6 +94,20 @@ class ProjectUpdateRequest(BaseModel):
         if v is None:
             return None
         return _validate_https_url(v)
+
+    @field_validator("source_repo_url")
+    @classmethod
+    def _validate_source_repo_url(cls, v: str | None) -> str | None:
+        # Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25):
+        # HTTPS-scheme-only at v1; mirrors target_url validator.
+        if v is None:
+            return None
+        parsed = urlparse(v)
+        if parsed.scheme != "https":
+            raise ValueError("source_repo_url must use https://")
+        if not parsed.hostname:
+            raise ValueError("source_repo_url must include a hostname")
+        return v
 
 
 # ---------------------------------------------------------------- responses

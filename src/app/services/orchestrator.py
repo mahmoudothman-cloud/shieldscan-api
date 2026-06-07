@@ -156,6 +156,16 @@ def _target_type_for(scan_type: ScanType) -> str:
     return "web"
 
 
+# Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25): ScanTypes
+# that dispatch ``trivy-fs`` and therefore require ``source_repo_url``
+# threaded into the wire ``target`` block. Engine clones at job-pickup
+# time per Q-WIRE engine-clones lock.
+_SOURCE_REQUIRING_SCAN_TYPES: frozenset[ScanType] = frozenset({
+    ScanType.FULL_WEB_SOURCE,
+    ScanType.FULL_SPECTRUM,
+})
+
+
 # ================================================================ orchestrator
 
 
@@ -374,17 +384,28 @@ class ScanOrchestrator:
         ``callback_stream`` (renamed from plan-literal ``callback_channel``)
         reflects the ADR-014 vocabulary shift to Redis Streams.
         """
+        target_block: dict = {
+            "url": scan.project.target_url,
+            "target_type": _target_type_for(scan.scan_type),
+            "domain_verified": scan.project.domain_verified,
+        }
+        # Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25):
+        # thread source_repo_url for ScanTypes that dispatch trivy-fs
+        # per Q-WIRE engine-clones lock. Engine clones at job-pickup
+        # time (lazy per-job at worker per Q-RECON-TIMING) and stages
+        # under $TRIVY_SCAN_BASE_PATH/<scan_id>/ per Q-STAGING-PATH.
+        # ScanCreateRequest validator (routes/scans.py) guarantees
+        # source_repo_url is non-None when scan_type requires it.
+        # Drift #54 root-cause repair (api layer).
+        if scan.scan_type in _SOURCE_REQUIRING_SCAN_TYPES:
+            target_block["source_repo_url"] = scan.project.source_repo_url
         return {
             "id": str(job.id),
             "scan_id": str(scan.id),
             "organization_id": str(scan.organization_id),
             "engine": job.engine,
             "idempotency_key": job.idempotency_key,
-            "target": {
-                "url": scan.project.target_url,
-                "target_type": _target_type_for(scan.scan_type),
-                "domain_verified": scan.project.domain_verified,
-            },
+            "target": target_block,
             "auth": auth_payload,
             "config": dict(scan.config or {}),
             "mobile_config": mobile_payload,

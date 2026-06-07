@@ -151,6 +151,74 @@ async def test_create_project_rejects_missing_target_url(
     assert r.status_code == 422
 
 
+# ============================================================
+# Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25)
+# HTTPS-scheme validator on ``source_repo_url``
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_create_project_accepts_https_source_repo_url(
+    client, project_owner
+):
+    """Source-Ingestion Fix: HTTPS source_repo_url is accepted."""
+    org, _, headers = project_owner
+    payload = _create_payload()
+    payload["source_repo_url"] = "https://github.com/OWASP/NodeGoat.git"
+    r = await client.post(
+        f"/v1/orgs/{org.id}/projects", json=payload, headers=headers
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["source_repo_url"] == "https://github.com/OWASP/NodeGoat.git"
+
+
+@pytest.mark.asyncio
+async def test_create_project_rejects_http_source_repo_url(
+    client, project_owner
+):
+    """Source-Ingestion Fix: non-HTTPS schemes rejected (Q-AUTH +
+    Q-VALIDATOR locks; SSH/git/PAT auth forward-pinned)."""
+    org, _, headers = project_owner
+    payload = _create_payload()
+    payload["source_repo_url"] = "http://github.com/OWASP/NodeGoat.git"
+    r = await client.post(
+        f"/v1/orgs/{org.id}/projects", json=payload, headers=headers
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_project_rejects_ssh_source_repo_url(
+    client, project_owner
+):
+    """SSH-scheme git URLs are forward-pinned to a future Q-AUTH
+    expansion task; v1 rejects at the validator."""
+    org, _, headers = project_owner
+    payload = _create_payload()
+    payload["source_repo_url"] = "git@github.com:OWASP/NodeGoat.git"
+    r = await client.post(
+        f"/v1/orgs/{org.id}/projects", json=payload, headers=headers
+    )
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_project_accepts_null_source_repo_url(
+    client, project_owner
+):
+    """Null is the canonical no-source-repo-configured value
+    (preserves existing Project lifecycle; SCA-class scans require
+    it via route-handler 422 gate, not the schema validator)."""
+    org, _, headers = project_owner
+    payload = _create_payload()
+    # source_repo_url omitted entirely
+    r = await client.post(
+        f"/v1/orgs/{org.id}/projects", json=payload, headers=headers
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["source_repo_url"] is None
+
+
 @pytest.mark.asyncio
 async def test_create_project_allows_duplicate_names_in_same_org(
     client, project_owner, db_session

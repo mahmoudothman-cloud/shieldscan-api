@@ -308,6 +308,46 @@ async def test_non_mobile_scan_with_upload_id_returns_422(project_setup, client)
 
 
 @pytest.mark.asyncio
+async def test_full_web_source_without_source_repo_url_returns_422(
+    project_setup, client
+):
+    """Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25): a
+    ScanType that dispatches ``trivy-fs`` (FULL_WEB_SOURCE here)
+    requires ``Project.source_repo_url`` to be set. Repairs Drift #54
+    silent-no-op behavior at the request-validation layer per
+    Q-FAILURE-MODE hard-fail lock. project_setup's project has
+    ``source_repo_url=None`` so this dispatch is rejected with 422
+    + ``source_repo_url_required`` detail."""
+    s = project_setup
+    r = await client.post(
+        _url(s),
+        json={"scan_type": "full_web_source"},
+        headers=s["headers"],
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"] == "source_repo_url_required"
+
+
+@pytest.mark.asyncio
+async def test_full_web_source_with_source_repo_url_succeeds(
+    project_setup, client, db_session
+):
+    """Source-Ingestion Fix: with ``source_repo_url`` configured on
+    the project, FULL_WEB_SOURCE dispatch passes the new gate."""
+    s = project_setup
+    # Configure source_repo_url on the project.
+    s["project"].source_repo_url = "https://github.com/OWASP/NodeGoat.git"
+    await db_session.commit()
+
+    r = await client.post(
+        _url(s),
+        json={"scan_type": "full_web_source"},
+        headers=s["headers"],
+    )
+    assert r.status_code == 201, r.text
+
+
+@pytest.mark.asyncio
 async def test_public_scan_type_rejected_at_route_with_422(project_setup, client):
     """Public scans live on a different endpoint per ADDENDUM-CRITICAL-5
     §2.4. Rejected at the Pydantic layer before reaching the orchestrator
