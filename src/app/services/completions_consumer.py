@@ -79,11 +79,16 @@ import logging
 from typing import Callable
 from uuid import UUID, uuid4
 
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
 from sqlalchemy import insert, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import select_fresh
 from app.models.raw_findings import RawFinding
+from app.models.recon import AttackSurface, SubdomainStatus
 from app.models.scans import Scan, ScanJob, ScanStatus
 from app.schemas.raw_findings import RawFindingCreate
 from app.services.audit import ScanAction, audit
@@ -105,6 +110,27 @@ _TERMINAL_JOB_STATUSES: frozenset[str] = frozenset(
 # ingest. Trade-off accepted at MVP scale (single uvicorn worker;
 # duplicate events don't arrive). Trigger to revisit: same as the
 # multi-process posture — first deployment with N>1 uvicorn workers.
+
+
+def _parse_event_timestamp(raw) -> datetime | None:
+    """Permissive RFC3339 timestamp parser for engine-emitted event
+    fields (timestamp + last_probed_at per SPEC §7.6). Returns None
+    on missing/malformed input — caller falls back to event-level
+    timestamp or accepts None (the column is nullable).
+
+    Accepts both ``Z`` suffix and explicit ``+00:00`` offset
+    notations; datetime.fromisoformat handles ``+00:00`` natively
+    (Python 3.11+ also handles ``Z`` directly, but normalize for
+    older runtimes consistent with VERSIONS.md). Task 8.3α helper.
+    """
+    if not raw:
+        return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class CompletionsConsumer:
@@ -245,6 +271,18 @@ class CompletionsConsumer:
         # per ADR-017 + SPEC §7.3; the pre-extension filter would
         # silently drop them and the accumulator would never trigger.
         event_type = event.get("event_type")
+
+        # Task 8.3α: attack_surface events route to the dedicated
+        # _handle_attack_surface UPSERT path. Distinct lifecycle from
+        # job_completed/partial_findings: AttackSurface rows are
+        # UPSERT-idempotent-by-construction (uq_scan_subdomain +
+        # ON CONFLICT DO UPDATE per Q-MULTI-PROCESS-POSTURE b) and
+        # do NOT participate in event_seq sequencing per Q-LIFECYCLE.
+        # Drift #58 Layer B repair routing.
+        if event_type == "attack_surface":
+            await self._handle_attack_surface(event)
+            return
+
         if event_type not in ("job_completed", "partial_findings"):
             return  # ignore unrecognized
 
@@ -366,6 +404,126 @@ class CompletionsConsumer:
         # never reach this point; accumulator stays.
         async with self._accumulator_lock:
             self._accumulator.pop(key, None)
+
+    # ---------------------------------------------------------------- attack-surface handler
+
+    async def _handle_attack_surface(self, event: dict) -> None:
+        """UPSERT AttackSurface rows from an engine EventAttackSurface
+        event. Drift #58 Layer B repair (api consumer absence).
+
+        Per Task 8.3α design doc 0030319 §3.5 + plan dba6a7c §3.5:
+          - Y-UPSERT-ATOMICITY (c): atomic-per-event transaction; all
+            subdomains in a single commit. uq_scan_subdomain +
+            ON CONFLICT (scan_id, subdomain) DO UPDATE makes duplicate
+            delivery safe by construction (Q-MULTI-PROCESS-POSTURE b).
+          - Y-EVENT-PAYLOAD-VALIDATION (b): permissive parse — match
+            existing _persist convention; malformed UUIDs / URLs are
+            skipped with a WARN log rather than killing the loop.
+          - Q-RLS-GUC: SET app.current_org_id from event.organization_id
+            pre-write per V-MB / Phase-0 Deviation 3 pattern (no LOCAL;
+            UUID-validated f-string interpolation).
+          - ADR-013 sole-writer continuity: api consumer is the SOLE
+            writer of AttackSurface rows; engine never writes directly.
+          - ADR-017 sequencing NOT invoked: AttackSurface UPSERT does
+            not require event_seq.total handling — uq_scan_subdomain
+            UPSERT inherently idempotent.
+
+        Wire shape canonical: SPEC.md §7.6. Engine emission canonical:
+        TOOL-ARCHITECTURE.md §8.5 + shieldscan-engine fc75a98.
+        """
+        scan_id_raw = event.get("scan_id")
+        org_id_raw = event.get("organization_id")
+        root_domain = event.get("root_domain")
+        subdomains = event.get("subdomains") or []
+
+        if not scan_id_raw or not org_id_raw or not root_domain:
+            logger.warning(
+                "completions consumer: attack_surface event missing "
+                "required field(s); dropping (scan_id=%r org=%r root=%r)",
+                scan_id_raw,
+                org_id_raw,
+                root_domain,
+            )
+            return
+
+        try:
+            scan_id = UUID(str(scan_id_raw))
+            org_uuid = UUID(str(org_id_raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                "completions consumer: attack_surface event malformed "
+                "UUID; dropping (scan_id=%r org=%r)",
+                scan_id_raw,
+                org_id_raw,
+            )
+            return
+
+        # Build value rows BEFORE opening the session — malformed-URL
+        # entries are skipped permissively per Y-EVENT-PAYLOAD-VALIDATION
+        # (b); the surviving rows form the atomic-per-event commit.
+        event_ts = _parse_event_timestamp(event.get("timestamp"))
+        values: list[dict] = []
+        for sub in subdomains:
+            url = sub.get("url")
+            status_raw = sub.get("status")
+            if not url or not status_raw:
+                continue
+            parsed = urlparse(url)
+            subdomain_label = parsed.hostname
+            if not subdomain_label:
+                continue
+            try:
+                status_enum = SubdomainStatus(status_raw)
+            except ValueError:
+                # Unknown status string — skip permissively.
+                continue
+            values.append(
+                {
+                    "scan_id": scan_id,
+                    "organization_id": org_uuid,
+                    "root_domain": root_domain,
+                    "subdomain": subdomain_label,
+                    "full_url": url,
+                    "status": status_enum,
+                    "status_code": sub.get("status_code"),
+                    "tech_stack": sub.get("tech_stack"),
+                    "last_probed_at": _parse_event_timestamp(
+                        sub.get("last_probed_at")
+                    )
+                    or event_ts,
+                }
+            )
+
+        if not values:
+            # Empty-subdomains array OR all rows filtered out — no
+            # work to do. ADR-013 sole-writer pattern still requires
+            # we acknowledge the event by returning (Pub/Sub at-least-
+            # once redelivery is honest-acknowledgment-bounded; see
+            # module docstring).
+            return
+
+        async with self._session_factory() as db:
+            # RLS preamble. f-string is safe because org_uuid is a
+            # validated UUID. Mirrors existing _persist + project
+            # patterns (Phase-0 Deviation 3).
+            await db.execute(
+                text(f"SET app.current_org_id = '{org_uuid}'")
+            )
+
+            stmt = pg_insert(AttackSurface).values(values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["scan_id", "subdomain"],
+                set_={
+                    "full_url": stmt.excluded.full_url,
+                    "status": stmt.excluded.status,
+                    "status_code": stmt.excluded.status_code,
+                    "tech_stack": stmt.excluded.tech_stack,
+                    "last_probed_at": stmt.excluded.last_probed_at,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            )
+            await db.execute(stmt)
+            await db.commit()
 
     # ---------------------------------------------------------------- persistence helper
 

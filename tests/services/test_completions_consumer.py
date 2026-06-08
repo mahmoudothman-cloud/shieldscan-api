@@ -404,3 +404,352 @@ async def test_consumer_does_not_overwrite_canceled_scan(
             "consumer must NOT emit scan-level audit when scan is "
             "already terminal (CANCELED in this case)"
         )
+
+
+# ============================================================
+# Task 8.3α — EventAttackSurface UPSERT handler (7 tests)
+# ============================================================
+#
+# These tests pin the _handle_attack_surface contract per Task 8.3α
+# design doc 0030319 §3.5 + plan dba6a7c §3.5 + Drift #58 Layer B
+# repair. Stage 3 Commit 3 of 3 (cross-repo trio with shieldscan-docs
+# 721ba02 + shieldscan-engine fc75a98).
+#
+# Pattern: fakeredis + direct _handle invocation (per watch item F);
+# fresh-session reads with explicit SET app.current_org_id to verify
+# UPSERTed rows.
+
+
+def _attack_surface_event(
+    scan,
+    org,
+    root_domain="c.example.com",
+    subdomains=None,
+):
+    if subdomains is None:
+        subdomains = [
+            {
+                "url": "https://api.c.example.com",
+                "status": "live",
+                "status_code": 200,
+                "tech_stack": ["nginx", "Node.js"],
+                "last_probed_at": "2026-05-30T14:32:00Z",
+            },
+            {
+                "url": "https://staging.c.example.com",
+                "status": "live",
+                "status_code": 301,
+                "tech_stack": ["nginx"],
+                "last_probed_at": "2026-05-30T14:32:00Z",
+            },
+        ]
+    return {
+        "event_type": "attack_surface",
+        "scan_id": str(scan.id),
+        "organization_id": str(org.id),
+        "root_domain": root_domain,
+        "subdomains": subdomains,
+        "timestamp": "2026-05-30T14:32:01Z",
+    }
+
+
+# ---------------------------------------------------------------- 8.3α.1 happy-path UPSERT inserts
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_inserts_subdomains(
+    scan_with_jobs, fake_redis, session_factory
+):
+    from app.models.recon import AttackSurface, SubdomainStatus
+
+    s = scan_with_jobs
+    event = _attack_surface_event(s["scan"], s["org"])
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    await consumer._handle(event)
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        rows = (
+            await fresh.execute(
+                select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
+            )
+        ).scalars().all()
+        assert len(rows) == 2
+        urls = {r.full_url for r in rows}
+        assert urls == {
+            "https://api.c.example.com",
+            "https://staging.c.example.com",
+        }
+        labels = {r.subdomain for r in rows}
+        assert labels == {"api.c.example.com", "staging.c.example.com"}
+        statuses = {r.status for r in rows}
+        assert statuses == {SubdomainStatus.LIVE}
+
+
+# ---------------------------------------------------------------- 8.3α.2 duplicate-event idempotency (UPSERT)
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_upserts_on_conflict(
+    scan_with_jobs, fake_redis, session_factory
+):
+    """Re-delivering the same event MUST NOT create duplicate rows;
+    Q-MULTI-PROCESS-POSTURE (b) UPSERT-idempotency-by-construction via
+    uq_scan_subdomain. Second delivery updates last_probed_at /
+    status_code from the new payload."""
+    from app.models.recon import AttackSurface
+
+    s = scan_with_jobs
+    event_v1 = _attack_surface_event(
+        s["scan"],
+        s["org"],
+        subdomains=[
+            {
+                "url": "https://api.c.example.com",
+                "status": "live",
+                "status_code": 200,
+                "tech_stack": ["nginx"],
+                "last_probed_at": "2026-05-30T14:32:00Z",
+            }
+        ],
+    )
+    # v2 changes status_code (e.g., subdomain started returning 503).
+    event_v2 = _attack_surface_event(
+        s["scan"],
+        s["org"],
+        subdomains=[
+            {
+                "url": "https://api.c.example.com",
+                "status": "live",
+                "status_code": 503,
+                "tech_stack": ["nginx", "Apache"],
+                "last_probed_at": "2026-05-30T15:00:00Z",
+            }
+        ],
+    )
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    await consumer._handle(event_v1)
+    await consumer._handle(event_v2)
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        rows = (
+            await fresh.execute(
+                select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
+            )
+        ).scalars().all()
+        assert len(rows) == 1, "uq_scan_subdomain must prevent duplicate row"
+        assert rows[0].status_code == 503, "UPSERT must apply v2 status_code"
+        assert rows[0].tech_stack == ["nginx", "Apache"]
+
+
+# ---------------------------------------------------------------- 8.3α.3 RLS isolation (cross-org rejection)
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_rls_isolation(
+    scan_with_jobs, fake_redis, session_factory
+):
+    """A second org reading via SET app.current_org_id MUST NOT see
+    the first org's AttackSurface rows. Pins RLS isolation per
+    ADR-013 + AttackSurface TenantMixin."""
+    from app.models.recon import AttackSurface
+
+    s = scan_with_jobs
+    event = _attack_surface_event(s["scan"], s["org"])
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    await consumer._handle(event)
+
+    # Read as a DIFFERENT org_id — RLS must hide rows.
+    other_org_id = uuid4()
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{other_org_id}'"))
+        rows = (
+            await fresh.execute(
+                select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
+            )
+        ).scalars().all()
+        assert rows == [], "RLS must hide rows from foreign org"
+
+
+# ---------------------------------------------------------------- 8.3α.4 malformed URL skipped permissively
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_malformed_url_skipped(
+    scan_with_jobs, fake_redis, session_factory
+):
+    """Y-EVENT-PAYLOAD-VALIDATION (b) permissive parse: malformed URL
+    entries are skipped silently; well-formed entries in the same event
+    still persist."""
+    from app.models.recon import AttackSurface
+
+    s = scan_with_jobs
+    event = _attack_surface_event(
+        s["scan"],
+        s["org"],
+        subdomains=[
+            {"url": "not-a-url-at-all", "status": "live"},  # bad
+            {"url": "", "status": "live"},  # bad
+            {
+                "url": "https://valid.c.example.com",
+                "status": "live",
+                "status_code": 200,
+            },  # good
+        ],
+    )
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    await consumer._handle(event)
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        rows = (
+            await fresh.execute(
+                select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].full_url == "https://valid.c.example.com"
+
+
+# ---------------------------------------------------------------- 8.3α.5 empty subdomains handled as no-op
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_empty_subdomains_handled(
+    scan_with_jobs, fake_redis, session_factory
+):
+    """Empty subdomains array → no INSERT, no error. Pub/Sub at-least-
+    once redelivery semantics: still ack the event by returning."""
+    from app.models.recon import AttackSurface
+
+    s = scan_with_jobs
+    event = _attack_surface_event(s["scan"], s["org"], subdomains=[])
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    await consumer._handle(event)  # must not raise
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        rows = (
+            await fresh.execute(
+                select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
+            )
+        ).scalars().all()
+        assert rows == []
+
+
+# ---------------------------------------------------------------- 8.3α.6 missing optional fields tolerated
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_missing_optional_fields(
+    scan_with_jobs, fake_redis, session_factory
+):
+    """status_code / tech_stack / last_probed_at are optional per SPEC
+    §7.6; consumer fills last_probed_at from event-level timestamp when
+    missing."""
+    from app.models.recon import AttackSurface
+
+    s = scan_with_jobs
+    event = _attack_surface_event(
+        s["scan"],
+        s["org"],
+        subdomains=[
+            {"url": "https://minimal.c.example.com", "status": "dead"},
+        ],
+    )
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    await consumer._handle(event)
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        rows = (
+            await fresh.execute(
+                select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r.status_code is None
+        assert r.tech_stack is None
+        # last_probed_at filled from event.timestamp (2026-05-30T14:32:01Z).
+        assert r.last_probed_at is not None
+
+
+# ---------------------------------------------------------------- 8.3α.7 routing dispatch (_handle → _handle_attack_surface)
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_routing_dispatch(
+    scan_with_jobs, fake_redis, session_factory, monkeypatch
+):
+    """_handle(event) with event_type='attack_surface' routes to
+    _handle_attack_surface and does NOT fall through to the existing
+    job_completed / partial_findings event_seq path. Pins the routing
+    surface added in this commit."""
+    s = scan_with_jobs
+    event = _attack_surface_event(s["scan"], s["org"])
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+
+    called = {"attack_surface": 0, "single": 0, "intermediate": 0, "terminal": 0}
+
+    async def _spy_attack(self, ev):
+        called["attack_surface"] += 1
+
+    async def _spy_single(self, ev):
+        called["single"] += 1
+
+    async def _spy_intermediate(self, ev):
+        called["intermediate"] += 1
+
+    async def _spy_terminal(self, ev):
+        called["terminal"] += 1
+
+    monkeypatch.setattr(
+        CompletionsConsumer, "_handle_attack_surface", _spy_attack
+    )
+    monkeypatch.setattr(
+        CompletionsConsumer, "_handle_single_event", _spy_single
+    )
+    monkeypatch.setattr(
+        CompletionsConsumer, "_handle_intermediate_event", _spy_intermediate
+    )
+    monkeypatch.setattr(
+        CompletionsConsumer, "_handle_terminal_event", _spy_terminal
+    )
+
+    await consumer._handle(event)
+
+    assert called == {
+        "attack_surface": 1,
+        "single": 0,
+        "intermediate": 0,
+        "terminal": 0,
+    }, "attack_surface event MUST route to _handle_attack_surface only"
