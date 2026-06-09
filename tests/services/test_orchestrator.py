@@ -661,3 +661,137 @@ async def test_dispatch_commits_before_redis_dispatch(
     ).scalars().all()
     assert len(audits) == 1
     assert audits[0].details["job_count"] == 8
+
+
+# ============================================================
+# M8.1β.1 engine-variant resolution (shieldscan-docs bb3e75f)
+# ============================================================
+#
+# Per ADR-022 addendum continuation (SPEC §13): nuclei_fast in QUICK
+# ScanType folds into engine=nuclei + ScanConfig.Depth="quick" via the
+# _DEPTH_FOR_SCAN_TYPE map. nuclei_api/zap_api in API ScanType fold to
+# engine=nuclei/zap with target.target_type="api" (already auto-set by
+# _target_type_for). Y-ENGINE-VARIANT-RESOLUTION (a) config-flag.
+
+
+@pytest_asyncio.fixture
+async def quick_scan(db_session):
+    """Persisted QUICK-ScanType scan flow — for M8.1β.1 Depth injection.
+    Mirrors web_scan but with scan_type=QUICK + config={} so the
+    _DEPTH_FOR_SCAN_TYPE default is observable."""
+    org = Organization(name="Q Org", slug=f"q-{uuid4().hex[:8]}")
+    db_session.add(org)
+    await db_session.flush()
+    await use_org(db_session, org.id)
+
+    user = User(
+        email=f"q-{uuid4().hex[:6]}@t.co",
+        hashed_password=hash_password("QPass-1"),
+        full_name="Q",
+        email_verified=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN)
+    )
+
+    project = Project(
+        organization_id=org.id,
+        name="QApp",
+        target_url="https://q.example.com",
+        root_domain="example.com",
+        domain_verified=True,
+    )
+    db_session.add(project)
+    await db_session.flush()
+
+    scan = Scan(
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=ScanType.QUICK,
+        status=ScanStatus.QUEUED,
+        priority="normal",
+        config={},  # NO caller-supplied depth — default injection observable
+    )
+    db_session.add(scan)
+    await db_session.commit()
+    await db_session.refresh(scan)
+    scan.project = project  # type: ignore[attr-defined]
+
+    identity = AuthIdentity(
+        kind="jwt",
+        organization_id=org.id,
+        user=user,
+        role=MembershipRole.ADMIN,
+    )
+    return {
+        "org": org,
+        "project": project,
+        "user": user,
+        "scan": scan,
+        "identity": identity,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_quick_injects_depth_quick_default(
+    quick_scan, db_session, fake_redis
+):
+    """QUICK ScanType injects depth="quick" into the wire config block
+    when caller did NOT supply scan.config["depth"]. Per M8.1β.1
+    engine-variant resolution (SPEC §13 ADR-022 continuation):
+    nuclei_fast → engine=nuclei + ScanConfig.Depth="quick"."""
+    s = quick_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    jobs = await orch.dispatch(s["scan"], s["identity"])
+
+    # QUICK tuple is (subfinder, httpx, nuclei, sslyze) after M8.1β.1.
+    assert len(jobs) == 4
+    assert sorted(j.engine for j in jobs) == sorted(
+        ["subfinder", "httpx", "nuclei", "sslyze"]
+    )
+
+    # Drain queue + assert every payload's config block carries
+    # depth="quick" (injected by _build_config_block per
+    # _DEPTH_FOR_SCAN_TYPE[QUICK]).
+    queued = []
+    for _ in range(4):
+        item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+        assert item is not None
+        queued.append(json.loads(item[1]))
+    assert len(queued) == 4
+    for q in queued:
+        assert q["config"].get("depth") == "quick", (
+            f"engine={q['engine']} payload config must carry "
+            f"depth='quick' per M8.1β.1 default injection; got "
+            f"{q['config']!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_quick_caller_supplied_depth_wins(
+    quick_scan, db_session, fake_redis
+):
+    """Caller-supplied scan.config["depth"] takes precedence over the
+    _DEPTH_FOR_SCAN_TYPE default. Operator-tuning authority preserved."""
+    s = quick_scan
+    # Operator override: QUICK ScanType but they want "deep" anyway.
+    s["scan"].config = {"depth": "deep"}
+    await db_session.commit()
+    await db_session.refresh(s["scan"])
+    s["scan"].project = s["project"]  # type: ignore[attr-defined]
+
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+
+    queued = []
+    for _ in range(4):
+        item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+        assert item is not None
+        queued.append(json.loads(item[1]))
+    for q in queued:
+        assert q["config"].get("depth") == "deep", (
+            "caller-supplied depth MUST win over _DEPTH_FOR_SCAN_TYPE "
+            "default"
+        )

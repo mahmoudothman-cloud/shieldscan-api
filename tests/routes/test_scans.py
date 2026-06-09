@@ -254,8 +254,11 @@ async def test_create_mobile_scan_with_upload_id_succeeds(project_setup, client,
 
 @pytest.mark.asyncio
 async def test_create_api_scan_creates_4_jobs(project_setup, client, fake_redis):
-    # ScanType.API tuple: nuclei_api + zap_api + corstest + sqlmap
-    # (sqlmap appended per Task 7.6 cross-repo pair Commit 1, 2cd4065).
+    # ScanType.API tuple: nuclei + zap + corstest + sqlmap (per
+    # M8.1β.1 engine-variant resolution, shieldscan-docs bb3e75f:
+    # nuclei_api → nuclei + zap_api → zap; target.target_type="api"
+    # is the canonical variant discriminator per _target_type_for).
+    # sqlmap appended per Task 7.6 cross-repo pair Commit 1, 2cd4065.
     s = project_setup
     r = await client.post(
         _url(s),

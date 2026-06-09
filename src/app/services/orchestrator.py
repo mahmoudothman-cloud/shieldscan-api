@@ -89,7 +89,7 @@ class UnsupportedScanTypeError(ValueError):
 # a separate job payload and there's no inter-tool sequencing here
 # (recon-driven target expansion is Go-side per Task 8.1).
 SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
-    ScanType.QUICK: ("subfinder", "httpx", "nuclei_fast", "sslyze"),
+    ScanType.QUICK: ("subfinder", "httpx", "nuclei", "sslyze"),
     ScanType.FULL_WEB: (
         "subfinder",
         "httpx",
@@ -113,7 +113,7 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
         "gitleaks",
         "depcheck",
     ),
-    ScanType.API: ("nuclei_api", "zap_api", "corstest", "sqlmap"),
+    ScanType.API: ("nuclei", "zap", "corstest", "sqlmap"),
     ScanType.MOBILE: ("mobsf",),
     ScanType.CONTAINER: ("trivy-container", "checkov"),
     ScanType.FULL_SPECTRUM: (
@@ -156,6 +156,28 @@ def _target_type_for(scan_type: ScanType) -> str:
     return "web"
 
 
+def _build_config_block(scan: Scan) -> dict:
+    """SPEC §7.1 ``config`` block — merges per-ScanType variant
+    defaults with caller-supplied ``scan.config``.
+
+    Per M8.1β.1 engine-variant resolution (SPEC §13 ADR-022 addendum
+    continuation, shieldscan-docs ``bb3e75f``): the artificial
+    ``nuclei_fast`` engine name (former QUICK ScanType entry) is
+    folded into ``engine=nuclei`` plus a default ``depth="quick"``
+    injected here. Caller-supplied ``scan.config["depth"]`` wins —
+    operators tuning at scan-create time stay authoritative.
+
+    The engine ``ScanConfig.Depth`` knob (Go side, ``runner.go:206``)
+    translates per-tool: Nuclei → ``-severity high,critical`` for
+    "quick"; Wapiti → scan-module reduction; etc.
+    """
+    block = dict(scan.config or {})
+    depth_default = _DEPTH_FOR_SCAN_TYPE.get(scan.scan_type)
+    if depth_default is not None and "depth" not in block:
+        block["depth"] = depth_default
+    return block
+
+
 # Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25): ScanTypes
 # that dispatch ``trivy-fs`` and therefore require ``source_repo_url``
 # threaded into the wire ``target`` block. Engine clones at job-pickup
@@ -164,6 +186,24 @@ _SOURCE_REQUIRING_SCAN_TYPES: frozenset[ScanType] = frozenset({
     ScanType.FULL_WEB_SOURCE,
     ScanType.FULL_SPECTRUM,
 })
+
+
+# M8.1β.1 engine-variant resolution (SPEC §13 ADR-022 addendum
+# continuation; bb3e75f): per-ScanType default value of
+# ScanConfig.Depth ("quick" | "standard" | "deep"). The engine
+# Nuclei runner consumes this knob via buildArgs(cfg) to translate
+# to its severity filter (-severity high,critical for "quick", etc.).
+# Other DAST tools (Wapiti) also honor Depth per runner.go:206-211.
+#
+# Per Y-ENGINE-VARIANT-RESOLUTION (a) config-flag, the artificial
+# nuclei_fast engine name (former QUICK ScanType entry) is folded
+# into engine=nuclei + Depth="quick". For ScanTypes that don't
+# require a Depth override, the wire ``config`` block stays whatever
+# scan.config carried (caller-supplied or empty). Per-scan
+# scan.config wins over the default — operators can still tune.
+_DEPTH_FOR_SCAN_TYPE: Final[dict[ScanType, str]] = {
+    ScanType.QUICK: "quick",
+}
 
 
 # ================================================================ orchestrator
@@ -407,7 +447,7 @@ class ScanOrchestrator:
             "idempotency_key": job.idempotency_key,
             "target": target_block,
             "auth": auth_payload,
-            "config": dict(scan.config or {}),
+            "config": _build_config_block(scan),
             "mobile_config": mobile_payload,
             "callback_stream": f"shieldscan:progress:{scan.id}",
             "created_at": (
