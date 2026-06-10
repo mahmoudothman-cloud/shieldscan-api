@@ -198,7 +198,11 @@ def _url(s):
 
 
 @pytest.mark.asyncio
-async def test_create_full_web_scan_creates_8_jobs(project_setup, client, db_session, fake_redis):
+async def test_create_full_web_scan_creates_recon_job_phase1(project_setup, client, db_session, fake_redis):
+    """M8.1β.2 ADR-028: web-ScanType (full_web) phase-1 dispatch creates
+    a SINGLE recon ScanJob; the per-(target, tool) tool jobs are
+    dispatched at phase-2 after recon discovers live targets. (Was
+    test_create_full_web_scan_creates_8_jobs pre-ADR-028.)"""
     s = project_setup
     r = await client.post(
         _url(s),
@@ -209,24 +213,23 @@ async def test_create_full_web_scan_creates_8_jobs(project_setup, client, db_ses
     body = r.json()
     assert body["status"] == "queued"
     assert body["scan_type"] == "full_web"
-    assert len(body["jobs"]) == 8
-    # Each job has id, engine, idempotency_key.
-    for job in body["jobs"]:
-        UUID(job["id"])
-        assert job["engine"]
-        assert ":" in job["idempotency_key"]
+    assert len(body["jobs"]) == 1
+    job = body["jobs"][0]
+    UUID(job["id"])
+    assert job["engine"] == "recon"
+    assert ":" in job["idempotency_key"]
 
-    # 8 queue items dispatched to 'normal' priority.
-    queued = []
-    for _ in range(8):
-        item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
-        assert item is not None
-        queued.append(json.loads(item[1]))
-    assert {q["engine"] for q in queued} == {j["engine"] for j in body["jobs"]}
+    # The single recon job is dispatched to 'normal' priority.
+    item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+    assert item is not None
+    assert json.loads(item[1])["engine"] == "recon"
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is None
 
 
 @pytest.mark.asyncio
-async def test_create_quick_scan_creates_4_jobs(project_setup, client, fake_redis):
+async def test_create_quick_scan_creates_recon_job_phase1(project_setup, client, fake_redis):
+    """M8.1β.2 ADR-028: web-ScanType (quick) phase-1 dispatch is
+    recon-only. (Was test_create_quick_scan_creates_4_jobs pre-ADR-028.)"""
     s = project_setup
     r = await client.post(
         _url(s),
@@ -234,7 +237,9 @@ async def test_create_quick_scan_creates_4_jobs(project_setup, client, fake_redi
         headers=s["headers"],
     )
     assert r.status_code == 201, r.text
-    assert len(r.json()["jobs"]) == 4
+    jobs = r.json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["engine"] == "recon"
 
 
 @pytest.mark.asyncio
@@ -569,4 +574,6 @@ async def test_create_scan_emits_exactly_one_scan_dispatched_audit(
     assert a.actor_id == s["user"].id
     assert a.organization_id == s["org"].id
     assert a.details["scan_type"] == "quick"
-    assert a.details["job_count"] == 4
+    # M8.1β.2 ADR-028: web-ScanType phase-1 SCAN_DISPATCHED is recon-only
+    # (job_count=1); tool jobs counted at phase-2 SCAN_DISPATCHED_PHASE2.
+    assert a.details["job_count"] == 1

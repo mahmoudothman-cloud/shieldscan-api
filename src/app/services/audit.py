@@ -121,6 +121,7 @@ class ScanAction(str, PyEnum):
 
     # === emitted in M4 ===
     SCAN_DISPATCHED = "scan.dispatched"  # Task 4.2 orchestrator
+    SCAN_DISPATCHED_PHASE2 = "scan.dispatched_phase2"  # M8.1β.2 ADR-028 phase-2 tool dispatch
     SCAN_CANCELED = "scan.canceled"  # Task 4.5 cancel endpoint
     SCAN_COMPLETED = "scan.completed"  # Task 4.2 completions consumer (terminal)
     SCAN_FAILED = "scan.failed"  # Task 4.2 completions consumer (terminal)

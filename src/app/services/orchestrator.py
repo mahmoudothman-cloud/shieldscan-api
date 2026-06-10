@@ -35,6 +35,7 @@ raises ``UnsupportedScanTypeError`` — fail-loud, no silent skip.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -47,9 +48,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import AuthIdentity
+from app.models.audit import AuditLog
 from app.models.mobile import MobileUpload
-from app.models.projects import ProjectCredential
-from app.models.scans import Scan, ScanJob, ScanType
+from app.models.projects import Project, ProjectCredential
+from app.models.recon import AttackSurface
+from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
 from app.services.audit import ScanAction, audit
 from app.services.credentials import decrypt_credential
 from app.services.r2 import generate_presigned_get_url
@@ -86,13 +89,20 @@ class UnsupportedScanTypeError(ValueError):
 
 # Each ScanType (excluding PUBLIC) maps to a non-empty tuple of tools.
 # Order in the tuple is informational only — workers receive each as
-# a separate job payload and there's no inter-tool sequencing here
-# (recon-driven target expansion is Go-side per Task 8.1).
+# a separate job payload and there's no inter-tool sequencing here.
+#
+# M8.1β.2 ADR-028 (SPEC §13): subfinder + httpx are NO LONGER in any
+# entry. Recon is dispatched as a phase-1 engine="recon" ScanJob
+# (orchestrator-implicit for web-ScanTypes; see _WEB_SCAN_TYPES +
+# dispatch()), keeping SCAN_TYPE_TOOLS semantically pure as a
+# tools-only list. The tools below are the phase-2 per-(target, tool)
+# dispatch set for web-ScanTypes (after recon-driven target expansion)
+# and the direct dispatch set for non-web-ScanTypes. Drift #60
+# recon-orphan sub-category resolved structurally (subfinder + httpx
+# removed; no longer dispatch to an unregistered engine).
 SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
-    ScanType.QUICK: ("subfinder", "httpx", "nuclei", "sslyze"),
+    ScanType.QUICK: ("nuclei", "sslyze"),
     ScanType.FULL_WEB: (
-        "subfinder",
-        "httpx",
         "nuclei",
         "zap",
         "wapiti",
@@ -101,8 +111,6 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
         "sslyze",
     ),
     ScanType.FULL_WEB_SOURCE: (
-        "subfinder",
-        "httpx",
         "nuclei",
         "zap",
         "wapiti",
@@ -117,8 +125,6 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
     ScanType.MOBILE: ("mobsf",),
     ScanType.CONTAINER: ("trivy-container", "checkov"),
     ScanType.FULL_SPECTRUM: (
-        "subfinder",
-        "httpx",
         "nuclei",
         "zap",
         "wapiti",
@@ -206,6 +212,22 @@ _DEPTH_FOR_SCAN_TYPE: Final[dict[ScanType, str]] = {
 }
 
 
+# M8.1β.2 ADR-028 recon-first architecture (SPEC §13; design doc
+# 3f07611; plan fb61129). Web-ScanTypes dispatch a single phase-1
+# recon ScanJob (engine="recon"; orchestrator-implicit per Y-RECON-
+# ENGINE-NAME a.ii); the per-(target, tool) tool ScanJobs are
+# dispatched at phase-2 (dispatch_phase2) after recon emits
+# EventAttackSurface → completions_consumer UPSERTs AttackSurface.
+# Non-web ScanTypes (API, MOBILE, CONTAINER) skip phase-1 and
+# dispatch all SCAN_TYPE_TOOLS engines directly (no recon phase).
+_WEB_SCAN_TYPES: Final[frozenset[ScanType]] = frozenset({
+    ScanType.QUICK,
+    ScanType.FULL_WEB,
+    ScanType.FULL_WEB_SOURCE,
+    ScanType.FULL_SPECTRUM,
+})
+
+
 # ================================================================ orchestrator
 
 
@@ -256,21 +278,46 @@ class ScanOrchestrator:
         # 2. Build ScanJob rows. One unix_ts shared across the scan's
         #    jobs — collision-free because engine varies (idempotency
         #    keys remain unique within the scan).
-        tools = SCAN_TYPE_TOOLS[scan.scan_type]
         unix_ts = int(time.time())
         target_url = scan.project.target_url if scan.scan_type != ScanType.MOBILE else ""
 
-        jobs = [
-            ScanJob(
-                organization_id=scan.organization_id,
-                scan_id=scan.id,
-                engine=tool,
-                target_url=target_url,
-                status="queued",
-                idempotency_key=f"{scan.id}:{tool}:{unix_ts}",
-            )
-            for tool in tools
-        ]
+        if scan.scan_type in _WEB_SCAN_TYPES:
+            # M8.1β.2 ADR-028 Phase-1: dispatch a SINGLE recon ScanJob
+            # (engine="recon"; orchestrator-implicit per Y-RECON-ENGINE-
+            # NAME a.ii). The per-(target, tool) tool ScanJobs are
+            # dispatched at phase-2 (dispatch_phase2) after recon emits
+            # EventAttackSurface → completions_consumer UPSERTs
+            # AttackSurface. The engine processor.Process routes
+            # engine="recon" to recon.RunRecon directly (NOT via
+            # registry per ADR-022; engine commit 2cf6f5d).
+            jobs = [
+                ScanJob(
+                    organization_id=scan.organization_id,
+                    scan_id=scan.id,
+                    engine="recon",
+                    target_url=target_url,
+                    status="queued",
+                    # Y-RECON-SCANJOB-IDEMPOTENCY-KEY (a): one recon job
+                    # per scan; no per-target hash needed at phase-1.
+                    idempotency_key=f"{scan.id}:recon:{unix_ts}",
+                )
+            ]
+        else:
+            # Non-web ScanTypes (API, MOBILE, CONTAINER): no recon phase;
+            # dispatch all SCAN_TYPE_TOOLS engines directly (existing
+            # behavior preserved).
+            tools = SCAN_TYPE_TOOLS[scan.scan_type]
+            jobs = [
+                ScanJob(
+                    organization_id=scan.organization_id,
+                    scan_id=scan.id,
+                    engine=tool,
+                    target_url=target_url,
+                    status="queued",
+                    idempotency_key=f"{scan.id}:{tool}:{unix_ts}",
+                )
+                for tool in tools
+            ]
         for job in jobs:
             self.db.add(job)
         await self.db.flush()
@@ -406,6 +453,7 @@ class ScanOrchestrator:
         job: ScanJob,
         auth_payload: dict | None,
         mobile_payload: dict | None,
+        target_url_override: str | None = None,
     ) -> dict:
         """Construct the SPEC §7.1 job-dispatch payload.
 
@@ -421,11 +469,17 @@ class ScanOrchestrator:
         (legacy r2:// reference) + ``signed_fetch_url`` (Q1 (β)
         sibling-field per ADR-013 Pre-Signed URL Extension addendum).
 
+        ``target_url_override`` (M8.1β.2 ADR-028 phase-2): when set, the
+        wire ``target.url`` is the discovered subdomain URL rather than
+        the project root ``target_url``. Phase-2 per-(target, tool)
+        ScanJobs scan the recon-discovered live subdomains; the default
+        None preserves existing phase-1 / non-web behavior (root URL).
+
         ``callback_stream`` (renamed from plan-literal ``callback_channel``)
         reflects the ADR-014 vocabulary shift to Redis Streams.
         """
         target_block: dict = {
-            "url": scan.project.target_url,
+            "url": target_url_override or scan.project.target_url,
             "target_type": _target_type_for(scan.scan_type),
             "domain_verified": scan.project.domain_verified,
         }
@@ -454,3 +508,223 @@ class ScanOrchestrator:
                 datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             ),
         }
+
+    # ============================================================ M8.1β.2 phase-2
+
+    async def dispatch_phase2(self, *, scan_id: UUID) -> list[ScanJob]:
+        """ADR-028 Phase-2: dispatch per-(target, tool) ScanJobs after
+        recon completes.
+
+        Invoked by ``completions_consumer._handle_attack_surface`` in a
+        fresh session after the AttackSurface UPSERT commits (Q7 c.ii
+        sequential sessions). Self-contained like ``dispatch()``:
+        persist + audit + commit + enqueue. The caller sets the RLS GUC
+        (``app.current_org_id``) before calling.
+
+        Per Q1 (c) hybrid follow-up dispatch + Q7 (c) orchestrator
+        method + Q7.4 V-WD Option α audit-log lookup (Drift #61
+        refinement). Identity context is recovered from the most recent
+        ``SCAN_DISPATCHED`` AuditLog row's ``actor_id`` (V-XB query
+        pattern: ``resource_type='scan'`` + ``resource_id=scan_id``) —
+        no AuthIdentity object is reconstructed (``audit()`` takes
+        ``actor_id`` directly; AuthIdentity is a frozen dataclass with
+        ``user: User``, not ``user_id``, so a partial reconstruction
+        would be ill-typed — Y-AUTHIDENTITY-RECONSTRUCTION-SHAPE (a)
+        minimal resolves to actor_id-only).
+
+        Empty-AttackSurface is correct behavior (Q2 i recon-first
+        semantics): zero phase-2 jobs, but the SCAN_DISPATCHED_PHASE2
+        audit is still emitted (Q5 b.i always-emit). Dispatch-precondition
+        failures (no dispatch-audit / scan-not-found) fail loud (Q7
+        c.ii.B) via ``_fail_scan_phase2``.
+        """
+        # Q7.4 Option α: audit-log lookup for identity context.
+        dispatch_row = (
+            await self.db.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.resource_type == "scan",
+                    AuditLog.resource_id == scan_id,
+                    AuditLog.action == ScanAction.SCAN_DISPATCHED.value,
+                )
+                .order_by(AuditLog.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if dispatch_row is None:
+            # Implicit-ordering-dependency violation (ADR-028 documented
+            # constraint): phase-2 trigger fired without a phase-1
+            # SCAN_DISPATCHED audit. Fail loud.
+            await self._fail_scan_phase2(scan_id, reason="no_dispatch_audit_found")
+            return []
+        actor_id = dispatch_row.actor_id
+
+        scan = await self.db.get(Scan, scan_id)
+        if scan is None:
+            await self._fail_scan_phase2(
+                scan_id, reason="scan_not_found", actor_id=actor_id
+            )
+            return []
+        # No ORM relationship for Scan.project (route handler + dispatch
+        # set it ad-hoc); load + attach for _build_job_payload.
+        project = await self.db.get(Project, scan.project_id)
+        scan.project = project  # type: ignore[attr-defined]
+
+        priority = ScanPriority(scan.priority)
+
+        # Load the recon-discovered live attack surface.
+        surface_rows = list(
+            (
+                await self.db.execute(
+                    select(AttackSurface).where(AttackSurface.scan_id == scan_id)
+                )
+            ).scalars()
+        )
+
+        non_recon_tools = [
+            t for t in SCAN_TYPE_TOOLS[scan.scan_type] if t != "recon"
+        ]
+
+        # Empty-AttackSurface (Q2 i): no live targets → no phase-2 jobs.
+        # Still emit the phase-2 audit (Q5 b.i) for operator visibility.
+        if not surface_rows:
+            await self._emit_phase2_audit(
+                scan,
+                actor_id=actor_id,
+                target_count=0,
+                tool_count=len(non_recon_tools),
+                job_count=0,
+                recon_event_id=dispatch_row.id,
+            )
+            await self.db.commit()
+            return []
+
+        # Credential lookup for the phase-2 tool jobs (no audit — the
+        # SCAN_CREDENTIAL_DECRYPTED audit was already emitted at phase-1
+        # dispatch; re-emitting here would double-count).
+        credential = (
+            await self.db.execute(
+                select(ProjectCredential).where(
+                    ProjectCredential.project_id == scan.project_id
+                )
+            )
+        ).scalar_one_or_none()
+        auth_payload: dict | None = None
+        if credential is not None:
+            decrypted = decrypt_credential(credential.encrypted_data)
+            auth_payload = {
+                "type": credential.auth_type,
+                "data": decrypted["data"],
+            }
+            if "fields" in decrypted:
+                auth_payload["fields"] = decrypted["fields"]
+
+        # Build per-(target, tool) ScanJobs. Idempotency-key per Q2
+        # (a.ii): {scan_id}:{tool}:{sha256(target_url)[:16]}:{ts} —
+        # deterministic per (scan, tool, target), order-independent.
+        unix_ts = int(time.time())
+        created_jobs: list[ScanJob] = []
+        for surface in surface_rows:
+            target_hash = hashlib.sha256(
+                surface.full_url.encode()
+            ).hexdigest()[:16]
+            for tool in non_recon_tools:
+                created_jobs.append(
+                    ScanJob(
+                        organization_id=scan.organization_id,
+                        scan_id=scan_id,
+                        engine=tool,
+                        target_url=surface.full_url,
+                        status="queued",
+                        idempotency_key=f"{scan_id}:{tool}:{target_hash}:{unix_ts}",
+                    )
+                )
+        for job in created_jobs:
+            self.db.add(job)
+        await self.db.flush()
+
+        await self._emit_phase2_audit(
+            scan,
+            actor_id=actor_id,
+            target_count=len(surface_rows),
+            tool_count=len(non_recon_tools),
+            job_count=len(created_jobs),
+            recon_event_id=dispatch_row.id,
+        )
+
+        # H.3 commit-then-dispatch ordering (mirrors dispatch()).
+        await self.db.commit()
+
+        for job in created_jobs:
+            payload = await self._build_job_payload(
+                scan,
+                job,
+                auth_payload,
+                None,
+                target_url_override=job.target_url,
+            )
+            await self.queue.dispatch(priority.value, payload)
+
+        return created_jobs
+
+    async def _emit_phase2_audit(
+        self,
+        scan: Scan,
+        *,
+        actor_id: UUID | None,
+        target_count: int,
+        tool_count: int,
+        job_count: int,
+        recon_event_id: UUID,
+    ) -> None:
+        """Emit SCAN_DISPATCHED_PHASE2 (Q5 b two-phase + b.i always-emit
+        + rich details). Does not commit (caller owns the transaction
+        boundary)."""
+        await audit(
+            self.db,
+            organization_id=scan.organization_id,
+            actor_id=actor_id,
+            action=ScanAction.SCAN_DISPATCHED_PHASE2,
+            resource_type="scan",
+            resource_id=scan.id,
+            details={
+                "scan_type": scan.scan_type.value,
+                "priority": scan.priority,
+                "phase": "tools",
+                "target_count": target_count,
+                "tool_count": tool_count,
+                "job_count": job_count,
+                "recon_event_id": str(recon_event_id),
+            },  # type: ignore[arg-type]
+        )
+
+    async def _fail_scan_phase2(
+        self,
+        scan_id: UUID,
+        *,
+        reason: str,
+        actor_id: UUID | None = None,
+    ) -> None:
+        """Fail-loud phase-2 dispatch (Q7 c.ii.B) with a diagnostic-rich
+        SCAN_FAILED audit (Y-PHASE2-DISPATCH-FAILURE-AUDIT-SHAPE b).
+        Marks the scan FAILED when it exists; commits its own transaction
+        (the surrounding dispatch_phase2 returns early after this)."""
+        scan = await self.db.get(Scan, scan_id)
+        org_id = scan.organization_id if scan is not None else None
+        if scan is not None:
+            scan.status = ScanStatus.FAILED
+        if org_id is not None:
+            await audit(
+                self.db,
+                organization_id=org_id,
+                actor_id=actor_id,
+                action=ScanAction.SCAN_FAILED,
+                resource_type="scan",
+                resource_id=scan_id,
+                details={
+                    "phase": "tools",
+                    "failure": "phase2_dispatch_precondition",
+                    "reason": reason,
+                },  # type: ignore[arg-type]
+            )
+        await self.db.commit()

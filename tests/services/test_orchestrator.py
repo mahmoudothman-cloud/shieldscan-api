@@ -28,6 +28,7 @@ from app.models.identity import APIKey, Membership, MembershipRole, Organization
 from app.models.audit import AuditLog
 from app.models.mobile import MobilePlatform, MobileUpload
 from app.models.projects import Project, ProjectCredential
+from app.models.recon import AttackSurface, SubdomainStatus
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
 from app.services.api_keys import generate_api_key
 from app.services.audit import ScanAction
@@ -183,14 +184,18 @@ async def mobile_scan(db_session):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_full_web_creates_8_jobs(web_scan, db_session, fake_redis):
+async def test_dispatch_full_web_phase1_recon_only(web_scan, db_session, fake_redis):
+    """M8.1β.2 ADR-028: web-ScanType phase-1 dispatch creates a SINGLE
+    recon ScanJob (engine="recon"), NOT the full SCAN_TYPE_TOOLS set.
+    The per-(target, tool) tool jobs are dispatched at phase-2
+    (dispatch_phase2) after recon emits EventAttackSurface."""
     s = web_scan
     orch = ScanOrchestrator(db_session, fake_redis)
     jobs = await orch.dispatch(s["scan"], s["identity"])
 
-    assert len(jobs) == 8
-    expected = SCAN_TYPE_TOOLS[ScanType.FULL_WEB]
-    assert sorted(j.engine for j in jobs) == sorted(expected)
+    assert len(jobs) == 1, "phase-1 web dispatch is recon-only"
+    assert jobs[0].engine == "recon"
+    assert jobs[0].idempotency_key == f"{s['scan'].id}:recon:{jobs[0].idempotency_key.rsplit(':', 1)[1]}"
 
     # Persisted in DB.
     db_jobs = (
@@ -198,21 +203,16 @@ async def test_dispatch_full_web_creates_8_jobs(web_scan, db_session, fake_redis
             select(ScanJob).where(ScanJob.scan_id == s["scan"].id)
         )
     ).scalars().all()
-    assert len(db_jobs) == 8
+    assert len(db_jobs) == 1
+    assert db_jobs[0].engine == "recon"
 
-    # All 8 dispatched onto the queue.
-    queued = []
-    for _ in range(8):
-        item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
-        assert item is not None
-        queued.append(json.loads(item[1]))
-    assert len(queued) == 8
-    assert {q["engine"] for q in queued} == set(expected)
-    # Source-Ingestion Fix invariant: FULL_WEB does NOT thread
-    # source_repo_url into the wire target block (only the source-
-    # requiring set FULL_WEB_SOURCE + FULL_SPECTRUM does).
-    for q in queued:
-        assert "source_repo_url" not in q["target"]
+    # The single recon job is queued.
+    item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+    assert item is not None
+    q = json.loads(item[1])
+    assert q["engine"] == "recon"
+    # No second job on the queue.
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is None
 
 
 # ---------------------------------------------------------------- Source-Ingestion Fix: trivy-fs source threading
@@ -280,13 +280,40 @@ async def test_dispatch_threads_source_repo_url_for_full_web_source(
         role=MembershipRole.ADMIN,
     )
     orch = ScanOrchestrator(db_session, fake_redis)
-    jobs = await orch.dispatch(scan, identity)
-    assert len(jobs) == len(SCAN_TYPE_TOOLS[ScanType.FULL_WEB_SOURCE])
 
-    # Drain every queued payload + assert source_repo_url present on
-    # every job's target block.
+    # M8.1β.2 ADR-028: the source_repo_url threading invariant (Drift #54)
+    # now lives at PHASE-2 — FULL_WEB_SOURCE phase-1 dispatches only the
+    # recon job; the trivy-fs tool job (which carries source_repo_url) is
+    # dispatched at phase-2 after recon discovers live targets.
+    phase1 = await orch.dispatch(scan, identity)
+    assert len(phase1) == 1 and phase1[0].engine == "recon"
+    # drain the recon job off the queue.
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is not None
+
+    # Seed one live attack-surface row (recon-discovered subdomain).
+    db_session.add(
+        AttackSurface(
+            organization_id=org.id,
+            scan_id=scan.id,
+            root_domain="example.com",
+            subdomain="src.example.com",
+            full_url="https://src.example.com",
+            status=SubdomainStatus.LIVE,
+            status_code=200,
+        )
+    )
+    await db_session.commit()
+
+    # Phase-2 dispatch: per-(target, tool) jobs carry source_repo_url.
+    phase2 = await orch.dispatch_phase2(scan_id=scan.id)
+    expected_tools = [
+        t for t in SCAN_TYPE_TOOLS[ScanType.FULL_WEB_SOURCE] if t != "recon"
+    ]
+    # 1 live target × N non-recon tools.
+    assert len(phase2) == len(expected_tools)
+
     queued = []
-    for _ in range(len(jobs)):
+    for _ in range(len(phase2)):
         item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
         assert item is not None
         queued.append(json.loads(item[1]))
@@ -295,6 +322,8 @@ async def test_dispatch_threads_source_repo_url_for_full_web_source(
         == "https://github.com/OWASP/NodeGoat.git"
         for q in queued
     ), [q["target"] for q in queued]
+    # Phase-2 jobs scan the discovered subdomain, not the root.
+    assert all(q["target"]["url"] == "https://src.example.com" for q in queued)
 
 
 # ---------------------------------------------------------------- 2. mobile branch
@@ -640,16 +669,18 @@ async def test_dispatch_commits_before_redis_dispatch(
     with pytest.raises(ConnectionError):
         await orch.dispatch(s["scan"], s["identity"])
 
-    # DB rows persisted despite Redis failure.
+    # DB rows persisted despite Redis failure. M8.1β.2: FULL_WEB phase-1
+    # is recon-only (1 job), so the commit-then-dispatch contract pins 1.
     persisted = (
         await db_session.execute(
             select(ScanJob).where(ScanJob.scan_id == s["scan"].id)
         )
     ).scalars().all()
-    assert len(persisted) == 8, (
-        f"commit-then-dispatch contract: ScanJob rows must persist "
+    assert len(persisted) == 1, (
+        f"commit-then-dispatch contract: recon ScanJob row must persist "
         f"even when queue dispatch fails — got {len(persisted)} rows"
     )
+    assert persisted[0].engine == "recon"
 
     # Audit row was emitted as part of the orchestrator's transaction
     # (which committed before the queue.dispatch call).
@@ -660,7 +691,7 @@ async def test_dispatch_commits_before_redis_dispatch(
         )
     ).scalars().all()
     assert len(audits) == 1
-    assert audits[0].details["job_count"] == 8
+    assert audits[0].details["job_count"] == 1
 
 
 # ============================================================
@@ -734,64 +765,271 @@ async def quick_scan(db_session):
     }
 
 
+async def _seed_attack_surface(db_session, scan, org, url="https://api.q.example.com"):
+    """Insert one live AttackSurface row for a scan (recon-discovered)."""
+    db_session.add(
+        AttackSurface(
+            organization_id=org.id,
+            scan_id=scan.id,
+            root_domain="example.com",
+            subdomain=url.split("://", 1)[-1],
+            full_url=url,
+            status=SubdomainStatus.LIVE,
+            status_code=200,
+        )
+    )
+    await db_session.commit()
+
+
 @pytest.mark.asyncio
-async def test_dispatch_quick_injects_depth_quick_default(
+async def test_dispatch_quick_phase2_injects_depth_quick_default(
     quick_scan, db_session, fake_redis
 ):
     """QUICK ScanType injects depth="quick" into the wire config block
-    when caller did NOT supply scan.config["depth"]. Per M8.1β.1
-    engine-variant resolution (SPEC §13 ADR-022 continuation):
-    nuclei_fast → engine=nuclei + ScanConfig.Depth="quick"."""
+    of PHASE-2 tool jobs when caller did NOT supply scan.config["depth"].
+    Per M8.1β.1 engine-variant resolution (SPEC §13 ADR-022 continuation)
+    composed with M8.1β.2 ADR-028 two-phase dispatch: nuclei depth knob
+    flows through _build_config_block at phase-2."""
     s = quick_scan
     orch = ScanOrchestrator(db_session, fake_redis)
-    jobs = await orch.dispatch(s["scan"], s["identity"])
 
-    # QUICK tuple is (subfinder, httpx, nuclei, sslyze) after M8.1β.1.
-    assert len(jobs) == 4
-    assert sorted(j.engine for j in jobs) == sorted(
-        ["subfinder", "httpx", "nuclei", "sslyze"]
-    )
+    # Phase-1: recon only.
+    phase1 = await orch.dispatch(s["scan"], s["identity"])
+    assert len(phase1) == 1 and phase1[0].engine == "recon"
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is not None
 
-    # Drain queue + assert every payload's config block carries
-    # depth="quick" (injected by _build_config_block per
-    # _DEPTH_FOR_SCAN_TYPE[QUICK]).
+    # Seed live target + phase-2 dispatch.
+    await _seed_attack_surface(db_session, s["scan"], s["org"])
+    phase2 = await orch.dispatch_phase2(scan_id=s["scan"].id)
+    # QUICK non-recon tools: (nuclei, sslyze).
+    assert len(phase2) == 2
+
     queued = []
-    for _ in range(4):
+    for _ in range(len(phase2)):
         item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
         assert item is not None
         queued.append(json.loads(item[1]))
-    assert len(queued) == 4
     for q in queued:
         assert q["config"].get("depth") == "quick", (
-            f"engine={q['engine']} payload config must carry "
-            f"depth='quick' per M8.1β.1 default injection; got "
+            f"engine={q['engine']} phase-2 payload config must carry "
+            f"depth='quick' per _DEPTH_FOR_SCAN_TYPE[QUICK]; got "
             f"{q['config']!r}"
         )
 
 
 @pytest.mark.asyncio
-async def test_dispatch_quick_caller_supplied_depth_wins(
+async def test_dispatch_quick_phase2_caller_supplied_depth_wins(
     quick_scan, db_session, fake_redis
 ):
     """Caller-supplied scan.config["depth"] takes precedence over the
-    _DEPTH_FOR_SCAN_TYPE default. Operator-tuning authority preserved."""
+    _DEPTH_FOR_SCAN_TYPE default at phase-2. Operator-tuning preserved."""
     s = quick_scan
-    # Operator override: QUICK ScanType but they want "deep" anyway.
     s["scan"].config = {"depth": "deep"}
     await db_session.commit()
     await db_session.refresh(s["scan"])
     s["scan"].project = s["project"]  # type: ignore[attr-defined]
 
     orch = ScanOrchestrator(db_session, fake_redis)
-    await orch.dispatch(s["scan"], s["identity"])
+    phase1 = await orch.dispatch(s["scan"], s["identity"])
+    assert len(phase1) == 1 and phase1[0].engine == "recon"
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is not None
+
+    await _seed_attack_surface(db_session, s["scan"], s["org"])
+    phase2 = await orch.dispatch_phase2(scan_id=s["scan"].id)
 
     queued = []
-    for _ in range(4):
+    for _ in range(len(phase2)):
         item = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
         assert item is not None
         queued.append(json.loads(item[1]))
     for q in queued:
         assert q["config"].get("depth") == "deep", (
             "caller-supplied depth MUST win over _DEPTH_FOR_SCAN_TYPE "
-            "default"
+            "default at phase-2"
         )
+
+
+# ---------------------------------------------------------------- M8.1β.2 ADR-028 phase-1/phase-2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_non_web_scan_type_preserves_direct_dispatch(
+    db_session, fake_redis
+):
+    """Non-web ScanTypes (CONTAINER) dispatch all SCAN_TYPE_TOOLS engines
+    directly at phase-1 (no recon phase) — existing behavior preserved."""
+    org = Organization(name="NW Org", slug=f"nw-{uuid4().hex[:8]}")
+    db_session.add(org)
+    await db_session.flush()
+    await use_org(db_session, org.id)
+    user = User(
+        email=f"nw-{uuid4().hex[:6]}@t.co",
+        hashed_password=hash_password("NwPass-1"),
+        full_name="NW",
+        email_verified=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN)
+    )
+    project = Project(
+        organization_id=org.id,
+        name="NwApp",
+        target_url="https://nw.example.com",
+        root_domain="example.com",
+        domain_verified=True,
+    )
+    db_session.add(project)
+    await db_session.flush()
+    scan = Scan(
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=ScanType.CONTAINER,
+        status=ScanStatus.QUEUED,
+        priority="normal",
+        config={},
+    )
+    db_session.add(scan)
+    await db_session.commit()
+    await db_session.refresh(scan)
+    scan.project = project  # type: ignore[attr-defined]
+    identity = AuthIdentity(
+        kind="jwt", organization_id=org.id, user=user, role=MembershipRole.ADMIN
+    )
+
+    orch = ScanOrchestrator(db_session, fake_redis)
+    jobs = await orch.dispatch(scan, identity)
+    # CONTAINER tuple: (trivy-container, checkov) — no recon job.
+    assert sorted(j.engine for j in jobs) == sorted(
+        SCAN_TYPE_TOOLS[ScanType.CONTAINER]
+    )
+    assert "recon" not in {j.engine for j in jobs}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_phase2_creates_per_target_tool_jobs(
+    web_scan, db_session, fake_redis
+):
+    """Phase-2 creates N×M ScanJobs (N live targets × M non-recon tools)
+    with the Q2 (a.ii) target_hash idempotency-key format."""
+    import hashlib
+
+    s = web_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])  # phase-1 (recon + audit)
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is not None
+
+    # Two live targets.
+    urls = ["https://a.example.com", "https://b.example.com"]
+    for u in urls:
+        await _seed_attack_surface(db_session, s["scan"], s["org"], url=u)
+
+    phase2 = await orch.dispatch_phase2(scan_id=s["scan"].id)
+    non_recon = [t for t in SCAN_TYPE_TOOLS[ScanType.FULL_WEB] if t != "recon"]
+    assert len(phase2) == 2 * len(non_recon)
+
+    # Idempotency-key format: {scan_id}:{tool}:{sha256(url)[:16]}:{ts}
+    for job in phase2:
+        target_hash = hashlib.sha256(job.target_url.encode()).hexdigest()[:16]
+        assert f":{target_hash}:" in job.idempotency_key
+        assert job.idempotency_key.startswith(f"{s['scan'].id}:{job.engine}:")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_phase2_empty_attack_surface_emits_audit_no_jobs(
+    web_scan, db_session, fake_redis
+):
+    """Empty-AttackSurface (Q2 i): zero phase-2 jobs, but the
+    SCAN_DISPATCHED_PHASE2 audit is still emitted (Q5 b.i always-emit)."""
+    s = web_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])  # phase-1
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is not None
+
+    # No AttackSurface rows seeded → empty surface.
+    phase2 = await orch.dispatch_phase2(scan_id=s["scan"].id)
+    assert phase2 == []
+
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_DISPATCHED_PHASE2.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalars().all()
+    assert len(audits) == 1
+    assert audits[0].details["target_count"] == 0
+    assert audits[0].details["job_count"] == 0
+    assert audits[0].details["phase"] == "tools"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_phase2_audit_emission_rich_details(
+    web_scan, db_session, fake_redis
+):
+    """SCAN_DISPATCHED_PHASE2 carries rich details + recon_event_id
+    pointing at the phase-1 SCAN_DISPATCHED audit (Q5 b + b.i)."""
+    s = web_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is not None
+
+    await _seed_attack_surface(db_session, s["scan"], s["org"])
+    await orch.dispatch_phase2(scan_id=s["scan"].id)
+
+    dispatch_audit = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_DISPATCHED.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalar_one()
+    phase2_audit = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_DISPATCHED_PHASE2.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalar_one()
+    # actor_id recovered via audit-log lookup (Q7.4 V-WD Option α).
+    assert phase2_audit.actor_id == dispatch_audit.actor_id
+    d = phase2_audit.details
+    assert d["target_count"] == 1
+    non_recon = [t for t in SCAN_TYPE_TOOLS[ScanType.FULL_WEB] if t != "recon"]
+    assert d["tool_count"] == len(non_recon)
+    assert d["job_count"] == len(non_recon)
+    assert d["recon_event_id"] == str(dispatch_audit.id)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_phase2_no_dispatch_audit_fails_loud(
+    web_scan, db_session, fake_redis
+):
+    """Phase-2 trigger without a phase-1 SCAN_DISPATCHED audit fails
+    loud (Q7 c.ii.B): scan marked FAILED + SCAN_FAILED audit emitted."""
+    s = web_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    # NOTE: we do NOT call dispatch() — so no SCAN_DISPATCHED audit exists.
+    await _seed_attack_surface(db_session, s["scan"], s["org"])
+
+    phase2 = await orch.dispatch_phase2(scan_id=s["scan"].id)
+    assert phase2 == []
+
+    fresh = await db_session.get(Scan, s["scan"].id)
+    await db_session.refresh(fresh)
+    assert fresh.status == ScanStatus.FAILED
+
+    fail_audits = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_FAILED.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalars().all()
+    assert len(fail_audits) == 1
+    assert fail_audits[0].details["reason"] == "no_dispatch_audit_found"
