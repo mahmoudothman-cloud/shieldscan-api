@@ -494,36 +494,79 @@ class CompletionsConsumer:
                 }
             )
 
-        if not values:
-            # Empty-subdomains array OR all rows filtered out — no
-            # work to do. ADR-013 sole-writer pattern still requires
-            # we acknowledge the event by returning (Pub/Sub at-least-
-            # once redelivery is honest-acknowledgment-bounded; see
-            # module docstring).
-            return
+        # UPSERT the discovered attack surface (Task 8.3α; Phase-1
+        # persistence). Empty `values` (recon found no live targets, or
+        # all rows filtered) skips the UPSERT but STILL proceeds to the
+        # phase-2 trigger below — empty-AttackSurface is correct
+        # recon-first behavior and must emit the always-emit phase-2
+        # audit (M8.1β.2 ADR-028 Q2 i + Q5 b.i).
+        if values:
+            async with self._session_factory() as db:
+                # RLS preamble. f-string is safe because org_uuid is a
+                # validated UUID. Mirrors existing _persist + project
+                # patterns (Phase-0 Deviation 3).
+                await db.execute(
+                    text(f"SET app.current_org_id = '{org_uuid}'")
+                )
 
-        async with self._session_factory() as db:
-            # RLS preamble. f-string is safe because org_uuid is a
-            # validated UUID. Mirrors existing _persist + project
-            # patterns (Phase-0 Deviation 3).
-            await db.execute(
-                text(f"SET app.current_org_id = '{org_uuid}'")
-            )
+                stmt = pg_insert(AttackSurface).values(values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["scan_id", "subdomain"],
+                    set_={
+                        "full_url": stmt.excluded.full_url,
+                        "status": stmt.excluded.status,
+                        "status_code": stmt.excluded.status_code,
+                        "tech_stack": stmt.excluded.tech_stack,
+                        "last_probed_at": stmt.excluded.last_probed_at,
+                        "updated_at": datetime.now(timezone.utc),
+                    },
+                )
+                await db.execute(stmt)
+                await db.commit()
 
-            stmt = pg_insert(AttackSurface).values(values)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["scan_id", "subdomain"],
-                set_={
-                    "full_url": stmt.excluded.full_url,
-                    "status": stmt.excluded.status,
-                    "status_code": stmt.excluded.status_code,
-                    "tech_stack": stmt.excluded.tech_stack,
-                    "last_probed_at": stmt.excluded.last_probed_at,
-                    "updated_at": datetime.now(timezone.utc),
-                },
+        # M8.1β.2 ADR-028 Phase-2 dispatch trigger. Sequential session
+        # per Q7 (c.ii): the AttackSurface UPSERT committed above (its own
+        # session); phase-2 now opens a NEW session. dispatch_phase2 is
+        # self-contained (persist + audit + commit + enqueue); it reads
+        # the just-UPSERTed AttackSurface rows + re-dispatches per-(target,
+        # tool) tool ScanJobs (Q1 c hybrid follow-up dispatch).
+        await self._trigger_phase2_dispatch(scan_id, org_uuid)
+
+    async def _trigger_phase2_dispatch(self, scan_id: UUID, org_uuid: UUID) -> None:
+        """Invoke orchestrator.dispatch_phase2 in a fresh session after
+        the AttackSurface UPSERT commits (M8.1β.2 ADR-028 Phase-2; Q7
+        c.ii sequential sessions). Fail-loud per Q7 (c.ii.B): on any
+        dispatch exception, mark the scan FAILED with a diagnostic-rich
+        audit (Y-PHASE2-DISPATCH-FAILURE-AUDIT-SHAPE b) in a separate
+        session so the failure is durable + operator-visible.
+
+        Import is local to avoid a module-level orchestrator↔consumer
+        import cycle (orchestrator imports models; consumer imports
+        orchestrator only at this call boundary).
+        """
+        from app.services.orchestrator import ScanOrchestrator
+
+        try:
+            async with self._session_factory() as dispatch_session:
+                await dispatch_session.execute(
+                    text(f"SET app.current_org_id = '{org_uuid}'")
+                )
+                orchestrator = ScanOrchestrator(dispatch_session, self._redis)
+                await orchestrator.dispatch_phase2(scan_id=scan_id)
+        except Exception:  # noqa: BLE001 — fail-loud per Q7 c.ii.B
+            logger.exception(
+                "completions consumer: phase-2 dispatch failed for "
+                "scan_id=%s; marking scan FAILED",
+                scan_id,
             )
-            await db.execute(stmt)
-            await db.commit()
+            async with self._session_factory() as fail_session:
+                await fail_session.execute(
+                    text(f"SET app.current_org_id = '{org_uuid}'")
+                )
+                fail_orchestrator = ScanOrchestrator(fail_session, self._redis)
+                await fail_orchestrator._fail_scan_phase2(
+                    scan_id, reason="phase2_dispatch_exception"
+                )
 
     # ---------------------------------------------------------------- persistence helper
 

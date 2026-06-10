@@ -753,3 +753,253 @@ async def test_handle_attack_surface_routing_dispatch(
         "intermediate": 0,
         "terminal": 0,
     }, "attack_surface event MUST route to _handle_attack_surface only"
+
+
+# ============================================================
+# M8.1β.2 ADR-028 — phase-2 dispatch trigger (Stage 3 Commit 4)
+# ============================================================
+#
+# _handle_attack_surface now invokes orchestrator.dispatch_phase2 in a
+# fresh session after the AttackSurface UPSERT commits (Q7 c.ii
+# sequential sessions). Fail-loud on dispatch failure (Q7 c.ii.B). The
+# e2e-style test exercises the full ScanCreate(dispatch phase-1) →
+# attack_surface event → UPSERT → phase-2 tool dispatch flow through the
+# real orchestrator (mock-heavy integration at the service layer per the
+# plan's V-BBF contingency — no tests/integration/ infra layer exists).
+
+
+async def _seed_scan_dispatched_audit(db_session, scan, org, user):
+    """Insert a phase-1 SCAN_DISPATCHED audit row so dispatch_phase2's
+    Q7.4 audit-log lookup (resource_type='scan' + resource_id) succeeds."""
+    db_session.add(
+        AuditLog(
+            organization_id=org.id,
+            actor_id=user.id,
+            action="scan.dispatched",
+            resource_type="scan",
+            resource_id=scan.id,
+            details={"scan_type": scan.scan_type.value, "job_count": 1},
+        )
+    )
+    await db_session.commit()
+
+
+@pytest_asyncio.fixture
+async def scan_with_user(db_session):
+    """QUICK scan + project + org + user + ADMIN membership, RUNNING.
+    Returns handles incl. the user (needed for SCAN_DISPATCHED actor_id)."""
+    org = Organization(name="P2 Org", slug=f"p2-{uuid4().hex[:8]}")
+    db_session.add(org)
+    await db_session.flush()
+    await use_org(db_session, org.id)
+    user = User(
+        email=f"p2-{uuid4().hex[:6]}@t.co",
+        hashed_password=hash_password("P2Pass-1"),
+        full_name="P2",
+        email_verified=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN)
+    )
+    project = Project(
+        organization_id=org.id,
+        name="P2App",
+        target_url="https://p2.example.com",
+        root_domain="example.com",
+        domain_verified=True,
+    )
+    db_session.add(project)
+    await db_session.flush()
+    scan = Scan(
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=ScanType.QUICK,
+        status=ScanStatus.RUNNING,
+        priority="normal",
+        config={},
+    )
+    db_session.add(scan)
+    await db_session.commit()
+    return {"org": org, "user": user, "project": project, "scan": scan}
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_triggers_phase2_dispatch(
+    scan_with_user, fake_redis, db_session, session_factory
+):
+    """Happy path: after the AttackSurface UPSERT, _handle_attack_surface
+    invokes orchestrator.dispatch_phase2, creating per-(target, tool)
+    ScanJobs for the discovered live subdomains (ADR-028 Phase-2)."""
+    from app.models.recon import AttackSurface  # noqa: F401
+
+    s = scan_with_user
+    await _seed_scan_dispatched_audit(db_session, s["scan"], s["org"], s["user"])
+
+    event = _attack_surface_event(s["scan"], s["org"])  # 2 live subdomains
+    consumer = CompletionsConsumer(session_factory=session_factory, redis=fake_redis)
+    await consumer._handle_attack_surface(event)
+
+    # QUICK non-recon tools = (nuclei, sslyze) → 2 tools × 2 targets = 4 jobs.
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        tool_jobs = (
+            await fresh.execute(
+                select(ScanJob).where(
+                    ScanJob.scan_id == s["scan"].id,
+                    ScanJob.engine.in_(["nuclei", "sslyze"]),
+                )
+            )
+        ).scalars().all()
+        assert len(tool_jobs) == 4
+        # Jobs target the discovered subdomains, not the root.
+        targets = {j.target_url for j in tool_jobs}
+        assert targets == {
+            "https://api.c.example.com",
+            "https://staging.c.example.com",
+        }
+        # SCAN_DISPATCHED_PHASE2 audit emitted (Q5 b).
+        phase2_audits = (
+            await fresh.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "scan.dispatched_phase2",
+                    AuditLog.resource_id == s["scan"].id,
+                )
+            )
+        ).scalars().all()
+        assert len(phase2_audits) == 1
+        assert phase2_audits[0].details["target_count"] == 2
+        assert phase2_audits[0].details["job_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_phase2_no_dispatch_audit_fail_loud(
+    scan_with_user, fake_redis, db_session, session_factory
+):
+    """Fail-loud (Q7 c.ii.B): _handle_attack_surface fires phase-2, but
+    no phase-1 SCAN_DISPATCHED audit exists → scan marked FAILED +
+    SCAN_FAILED audit emitted. No tool jobs created."""
+    s = scan_with_user
+    # NOTE: no _seed_scan_dispatched_audit → audit-log lookup misses.
+    event = _attack_surface_event(s["scan"], s["org"])
+    consumer = CompletionsConsumer(session_factory=session_factory, redis=fake_redis)
+    await consumer._handle_attack_surface(event)
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        fresh_scan = await fresh.get(Scan, s["scan"].id)
+        assert fresh_scan.status == ScanStatus.FAILED
+        fail_audits = (
+            await fresh.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "scan.failed",
+                    AuditLog.resource_id == s["scan"].id,
+                )
+            )
+        ).scalars().all()
+        assert len(fail_audits) == 1
+        assert fail_audits[0].details["reason"] == "no_dispatch_audit_found"
+        # No tool jobs dispatched.
+        tool_jobs = (
+            await fresh.execute(
+                select(ScanJob).where(
+                    ScanJob.scan_id == s["scan"].id,
+                    ScanJob.engine.in_(["nuclei", "sslyze"]),
+                )
+            )
+        ).scalars().all()
+        assert tool_jobs == []
+
+
+@pytest.mark.asyncio
+async def test_handle_attack_surface_empty_surface_still_triggers_phase2(
+    scan_with_user, fake_redis, db_session, session_factory
+):
+    """Empty-AttackSurface (recon found no live targets) still triggers
+    phase-2 → zero tool jobs but SCAN_DISPATCHED_PHASE2 audit emitted
+    with target_count=0 (ADR-028 Q2 i + Q5 b.i always-emit)."""
+    s = scan_with_user
+    await _seed_scan_dispatched_audit(db_session, s["scan"], s["org"], s["user"])
+
+    event = _attack_surface_event(s["scan"], s["org"], subdomains=[])
+    consumer = CompletionsConsumer(session_factory=session_factory, redis=fake_redis)
+    await consumer._handle_attack_surface(event)
+
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        phase2_audits = (
+            await fresh.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "scan.dispatched_phase2",
+                    AuditLog.resource_id == s["scan"].id,
+                )
+            )
+        ).scalars().all()
+        assert len(phase2_audits) == 1
+        assert phase2_audits[0].details["target_count"] == 0
+        assert phase2_audits[0].details["job_count"] == 0
+        tool_jobs = (
+            await fresh.execute(
+                select(ScanJob).where(
+                    ScanJob.scan_id == s["scan"].id,
+                    ScanJob.engine.in_(["nuclei", "sslyze"]),
+                )
+            )
+        ).scalars().all()
+        assert tool_jobs == []
+
+
+@pytest.mark.asyncio
+async def test_recon_first_e2e_via_consumer(
+    scan_with_user, fake_redis, db_session, session_factory
+):
+    """End-to-end (service layer): orchestrator.dispatch (phase-1 recon
+    + SCAN_DISPATCHED audit) → attack_surface event → consumer UPSERT →
+    dispatch_phase2 → per-(target, tool) tool ScanJobs. Exercises the
+    real orchestrator + consumer composition (ADR-028 full flow)."""
+    from app.dependencies import AuthIdentity
+    from app.services.orchestrator import ScanOrchestrator
+
+    s = scan_with_user
+    s["scan"].project = s["project"]  # type: ignore[attr-defined]
+    identity = AuthIdentity(
+        kind="jwt", organization_id=s["org"].id, user=s["user"],
+        role=MembershipRole.ADMIN,
+    )
+
+    # Phase-1: real orchestrator dispatch → recon ScanJob + SCAN_DISPATCHED.
+    orch = ScanOrchestrator(db_session, fake_redis)
+    phase1 = await orch.dispatch(s["scan"], identity)
+    assert len(phase1) == 1 and phase1[0].engine == "recon"
+
+    # Engine emits attack_surface (recon discovered 2 live subdomains).
+    event = _attack_surface_event(s["scan"], s["org"])
+    consumer = CompletionsConsumer(session_factory=session_factory, redis=fake_redis)
+    await consumer._handle_attack_surface(event)
+
+    # Phase-2 tool jobs created end-to-end.
+    async with session_factory() as fresh:
+        from sqlalchemy import text as _text
+        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        tool_jobs = (
+            await fresh.execute(
+                select(ScanJob).where(
+                    ScanJob.scan_id == s["scan"].id,
+                    ScanJob.engine.in_(["nuclei", "sslyze"]),
+                )
+            )
+        ).scalars().all()
+        assert len(tool_jobs) == 4  # 2 targets × (nuclei, sslyze)
+        # Drift #60 6/6 verification: NO subfinder/httpx jobs anywhere.
+        all_jobs = (
+            await fresh.execute(
+                select(ScanJob).where(ScanJob.scan_id == s["scan"].id)
+            )
+        ).scalars().all()
+        engines = {j.engine for j in all_jobs}
+        assert "subfinder" not in engines and "httpx" not in engines
+        assert "recon" in engines  # the phase-1 recon job
