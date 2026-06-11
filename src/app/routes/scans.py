@@ -47,7 +47,7 @@ import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
@@ -58,8 +58,11 @@ from app.dependencies import (
 )
 from app.models.mobile import MobileUpload
 from app.models.projects import Project
+from app.models.recon import AttackSurface, SubdomainStatus
 from app.models.scans import Scan, ScanStatus, ScanType
+from app.models.vulnerabilities import Vulnerability
 from app.redis_client import get_redis
+from app.schemas.recon import AttackSurfaceResponse, SubdomainEntry
 from app.schemas.scans import (
     ScanCreateRequest,
     ScanJobSummary,
@@ -696,3 +699,135 @@ async def stream_scan_progress(
             )
 
     return EventSourceResponse(_instrumented(), ping=_SSE_PING_INTERVAL)
+
+
+@scan_router.get(
+    "/{scan_id}/attack-surface",
+    response_model=AttackSurfaceResponse,
+    summary="Get attack-surface for scan",
+    description=(
+        "Returns subdomain enumeration + probe results for a scan's recon "
+        "phase. Per ADR-028, populated by phase-1 recon dispatch for web "
+        "ScanTypes. Non-web ScanTypes (MOBILE/CONTAINER/API) and scans with "
+        "no discovered surface return an empty payload (no recon rows)."
+    ),
+)
+async def get_attack_surface(
+    org_id: UUID,
+    scan_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    identity: AuthIdentity = Depends(require_org_membership()),
+) -> AttackSurfaceResponse:
+    """Return the attack-surface for a scan (Task 8.3β per SPEC §6.3).
+
+    Reads ``AttackSurface`` rows populated by the M8.1β.2 phase-1 recon
+    dispatch (ADR-028). The endpoint is a pure read aggregation — no
+    state mutation (ADR-013 sole-writer is unaffected).
+
+    Auth: ``require_org_membership()`` (JWT or API key), any-member —
+    symmetric with scan-create / cancel / progress. The dependency sets
+    ``app.current_org_id`` (RLS GUC); the scan lookup additionally
+    filters ``organization_id == org_id`` for existence-hiding
+    (cross-tenant scan_id → 404, not 403).
+
+    Y-decisions (ratified V-DDG this session):
+      Y1: live = count(status==LIVE); dead = count(status in
+          {DEAD, TIMEOUT}) — timeout bucketed as dead at the aggregate;
+          each row still reports its true status in ``subdomains[]``.
+      Y2: ``vulnerability_count`` joins the ``vulnerabilities`` table on
+          ``target_url == full_url`` (SPEC-literal). The M9 AI pipeline
+          populates that table; pre-M9 the count is 0. Forward-pinned.
+      Y4: scan-not-found → 404; scan exists with no AttackSurface rows
+          (incl. non-web ScanTypes) → 200 with an empty payload
+          (consistent with ADR-028 Q2 i empty-AttackSurface-is-valid).
+    """
+    # Scan lookup with cross-tenant existence-hiding (404 not 403).
+    scan = (
+        await db.execute(
+            select(Scan).where(
+                Scan.id == scan_id,
+                Scan.organization_id == org_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if scan is None:
+        raise _NOT_FOUND
+
+    # AttackSurface rows for this scan (RLS-scoped via the org GUC the
+    # auth dependency set; explicit scan_id filter narrows further).
+    surface_rows = list(
+        (
+            await db.execute(
+                select(AttackSurface).where(AttackSurface.scan_id == scan_id)
+            )
+        ).scalars()
+    )
+
+    # Y4: empty payload when no recon rows exist. root_domain is resolved
+    # from the bound project's target_url via an explicit scalar query
+    # (avoids an async lazy-load on scan.project).
+    if not surface_rows:
+        root_domain = (
+            await db.execute(
+                select(Project.target_url).where(Project.id == scan.project_id)
+            )
+        ).scalar_one_or_none() or ""
+        return AttackSurfaceResponse(
+            root_domain=root_domain,
+            total_discovered=0,
+            live=0,
+            dead=0,
+            subdomains=[],
+        )
+
+    # Y2: per-subdomain vulnerability_count via Vulnerability.target_url ↔
+    # AttackSurface.full_url join (SPEC-literal). 0 until M9 populates the
+    # vulnerabilities table (forward-pinned).
+    full_urls = [row.full_url for row in surface_rows]
+    vuln_count_rows = (
+        await db.execute(
+            select(
+                Vulnerability.target_url,
+                func.count(Vulnerability.id),
+            )
+            .where(
+                Vulnerability.scan_id == scan_id,
+                Vulnerability.target_url.in_(full_urls),
+            )
+            .group_by(Vulnerability.target_url)
+        )
+    ).all()
+    vuln_counts: dict[str, int] = {
+        target_url: count for target_url, count in vuln_count_rows
+    }
+
+    # Y1: aggregate counts — timeout bucketed as dead; row-level status
+    # preserved in the per-subdomain entries below.
+    live_count = sum(
+        1 for row in surface_rows if row.status == SubdomainStatus.LIVE
+    )
+    dead_count = sum(
+        1
+        for row in surface_rows
+        if row.status in {SubdomainStatus.DEAD, SubdomainStatus.TIMEOUT}
+    )
+
+    subdomains = [
+        SubdomainEntry(
+            url=row.full_url,
+            status=row.status.value,
+            status_code=row.status_code,
+            tech_stack=row.tech_stack,
+            vulnerability_count=vuln_counts.get(row.full_url, 0),
+            last_probed_at=row.last_probed_at,
+        )
+        for row in surface_rows
+    ]
+
+    return AttackSurfaceResponse(
+        root_domain=surface_rows[0].root_domain,
+        total_discovered=len(surface_rows),
+        live=live_count,
+        dead=dead_count,
+        subdomains=subdomains,
+    )
