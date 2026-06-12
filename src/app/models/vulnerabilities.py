@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -102,6 +103,18 @@ class Vulnerability(Base, TimestampMixin, TenantMixin):
 
     # Cross-layer corroboration (spec §8.3)
     corroborated_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    # --- ADR-029 M9.0 AI pipeline foundation ---
+    # Q5 Phase-5: reference to the Qdrant point representing this vuln's embedding
+    # (deterministic id); enables correlation explainability + future cross-scan dedup.
+    qdrant_point_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
+    # Q6 Phase-6: per-raw-finding traceability — the raw_findings this vuln was
+    # promoted from (hybrid clustering; one Vulnerability per dedup-cluster).
+    raw_finding_ids: Mapped[list[UUID] | None] = mapped_column(
+        ARRAY(PgUUID(as_uuid=True)), nullable=True
+    )
 
 
 class Evidence(Base, TimestampMixin, TenantMixin):

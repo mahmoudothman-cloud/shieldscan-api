@@ -89,6 +89,16 @@ class Scan(Base, TimestampMixin, TenantMixin):
     )
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # --- ADR-029 M9.0 AI pipeline foundation ---
+    # Q3 Phase-3 (Drift #65 resolution): intermediate executive-summary store
+    # at M9; full Report architecture (PDF/HTML + R2 + API) forward-pinned to M10.
+    executive_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Q8 Phase-8: flipped True when any AI pipeline stage falls back per SPEC §8.6;
+    # COMPLETED status is preserved when outputs are produced via fallback.
+    ai_pipeline_degraded: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
 
 class ScanJob(Base, TimestampMixin, TenantMixin):
     __tablename__ = "scan_jobs"

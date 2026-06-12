@@ -56,6 +56,7 @@ TENANT_TABLES: tuple[str, ...] = (
     "mobile_uploads",
     "attack_surface",
     "audit_logs",
+    "ai_api_calls",  # ADR-029 M9.0 — AI cost tracking; tenant-scoped (Gotcha 3)
 )
 
 

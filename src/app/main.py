@@ -34,6 +34,7 @@ from app.routes import auth as auth_routes
 from app.routes import mobile as mobile_routes
 from app.routes import projects as projects_routes
 from app.routes import scans as scans_routes
+from app.services.ai.clients import init_ai_clients, shutdown_ai_clients
 from app.services.completions_consumer import CompletionsConsumer
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,11 @@ async def lifespan(app: FastAPI):
         await close_redis()
         raise
 
+    # AI provider clients (ADR-029 Q7). Initialised after Redis, before the
+    # consumers, so the ai-pipeline-consumer (M9.0 Stage 3 C2) can rely on
+    # module-level singletons. Hard-fails if keys/URL are missing.
+    await init_ai_clients(settings)
+
     # Completions consumer (Task 4.2). Subscribes to
     # shieldscan:completions and applies job-completion events to PG.
     # See ADR-013 — Python is the sole writer for scan state.
@@ -65,6 +71,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await completions_consumer.stop()
+        await shutdown_ai_clients()
         await close_redis()
 
 

@@ -149,3 +149,17 @@ class RawFinding(Base, TimestampMixin, TenantMixin):
     # TRUE   → trufflehog verified the credential is currently live (rotate NOW)
     # FALSE  → pattern-matched only (Gitleaks or trufflehog unverified)
     secret_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # --- ADR-029 M9.0 AI pipeline foundation (Q6 Phase-6 promotion state) ---
+    # Set when this raw finding is promoted into a Vulnerability (M9.A activation
+    # populates these; M9.0 only adds the columns). Enables idempotent re-promotion
+    # + orphan detection.
+    promoted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    vulnerability_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("vulnerabilities.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
