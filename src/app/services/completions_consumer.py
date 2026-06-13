@@ -82,7 +82,7 @@ from uuid import UUID, uuid4
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from sqlalchemy import insert, select, text
+from sqlalchemy import func, insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -688,9 +688,17 @@ class CompletionsConsumer:
             # Aggregate scan-level state if all sibling jobs are now
             # terminal. Only the scan-level transition emits audit
             # (per H.2 — terminal-aggregate-only audit policy).
-            await self._maybe_complete_scan(db, job.scan_id)
+            # M9.0 (ADR-029 Q1): returns scan_id when the AI pipeline must be
+            # dispatched (raw_findings present); we dispatch AFTER commit in a
+            # fresh session (Q7 c.ii sequential), mirroring phase-2.
+            ai_dispatch_scan_id = await self._maybe_complete_scan(db, job.scan_id)
 
             await db.commit()
+
+        if ai_dispatch_scan_id is not None:
+            await self._trigger_ai_pipeline_dispatch(
+                ai_dispatch_scan_id, org_uuid
+            )
         return True
 
     # ---------------------------------------------------------------- finding_dict builder
@@ -731,24 +739,40 @@ class CompletionsConsumer:
 
     # ---------------------------------------------------------------- aggregate
 
-    async def _maybe_complete_scan(self, db: AsyncSession, scan_id: UUID) -> None:
-        """If every ScanJob for ``scan_id`` is terminal, transition
-        the parent Scan to COMPLETED (all-ok) or PARTIAL (any failure).
+    async def _maybe_complete_scan(
+        self, db: AsyncSession, scan_id: UUID
+    ) -> UUID | None:
+        """Aggregate scan-level state once all sibling jobs are terminal.
 
-        ``select_fresh`` for both reads — we just wrote to one of these
-        rows above and need the post-write state."""
+        Returns the ``scan_id`` when the caller must dispatch the AI pipeline
+        (post-commit, sequential session), or ``None`` otherwise.
+
+        ADR-029 Q1 interposition: a scan with raw_findings transitions to
+        ANALYZING via the AI pipeline (dispatched by the caller after commit;
+        the orchestrator owns the ANALYZING transition + LPUSH + audit), and
+        the terminal COMPLETED/PARTIAL transition + SCAN_COMPLETED audit are
+        emitted by the AIPipelineConsumer after the pipeline runs (DQ2 / DQ5).
+        A scan with NO raw_findings short-circuits to terminal inline — no AI
+        work to do (DQ3). ANALYZING is in the skip-set so a re-delivered
+        completion event can't re-dispatch (DQ4); CANCELED still wins.
+
+        ``select_fresh`` for both reads — we just wrote to one of these rows
+        above and need the post-write state.
+        """
         sibling_jobs = (
             await select_fresh(
                 db, select(ScanJob).where(ScanJob.scan_id == scan_id)
             )
         ).scalars().all()
         if not all(j.status in _TERMINAL_JOB_STATUSES for j in sibling_jobs):
-            return
+            return None
 
         any_failed = any(
             j.status in {"failed", "canceled"} for j in sibling_jobs
         )
         all_ok = all(j.status == "completed" for j in sibling_jobs)
+        if not (all_ok or any_failed):
+            return None
 
         scan = (
             await select_fresh(
@@ -756,7 +780,7 @@ class CompletionsConsumer:
             )
         ).scalar_one_or_none()
         if scan is None:
-            return  # extremely unlikely; scan deleted concurrently
+            return None  # extremely unlikely; scan deleted concurrently
         if scan.status in {
             ScanStatus.COMPLETED,
             ScanStatus.PARTIAL,
@@ -768,35 +792,80 @@ class CompletionsConsumer:
             # worker reported (some completed, some canceled). See
             # DRIFT-LOG 2026-04-30 Task 4.5 cancel-wins entry.
             ScanStatus.CANCELED,
+            # ANALYZING added at M9.0 (DQ4): the AI pipeline has already
+            # been dispatched; a re-delivered completion event must not
+            # re-dispatch. The AIPipelineConsumer owns the onward terminal
+            # transition.
+            ScanStatus.ANALYZING,
         }:
-            # Already terminal — don't re-aggregate, don't re-emit audit.
-            # Covers: peer worker process aggregated (4.2 H.4), or user
-            # canceled before completion landed (4.5 H.2).
-            return
+            return None
 
-        if all_ok:
-            scan.status = ScanStatus.COMPLETED
-            action = ScanAction.SCAN_COMPLETED
-        elif any_failed:
-            scan.status = ScanStatus.PARTIAL
-            action = ScanAction.SCAN_COMPLETED  # partial is still a "this scan is done" event
-            # Use SCAN_COMPLETED for any-jobs-completed terminal aggregate;
-            # SCAN_FAILED reserved for whole-scan failures (no jobs got
-            # any data through). Subtle: pin with a refinement.
-        else:
-            return
-        await db.flush()
-
-        finding_count_total = sum(j.finding_count or 0 for j in sibling_jobs)
-        await audit(
-            db,
-            organization_id=scan.organization_id,
-            actor_id=None,  # consumer is system-driven, no user actor
-            action=action,
-            resource_type="scan",
-            resource_id=scan.id,
-            details={  # type: ignore[arg-type]
-                "finding_count": finding_count_total,
-                "job_count": len(sibling_jobs),
-            },
+        # DQ3: no raw_findings → nothing for the AI pipeline to analyse;
+        # transition straight to terminal inline (preserves the empty-scan
+        # fast path) and emit SCAN_COMPLETED here.
+        raw_findings_count = await db.scalar(
+            select(func.count(RawFinding.id)).where(
+                RawFinding.scan_id == scan_id
+            )
         )
+        if not raw_findings_count:
+            scan.status = (
+                ScanStatus.COMPLETED if all_ok else ScanStatus.PARTIAL
+            )
+            await db.flush()
+            finding_count_total = sum(j.finding_count or 0 for j in sibling_jobs)
+            await audit(
+                db,
+                organization_id=scan.organization_id,
+                actor_id=None,  # consumer is system-driven, no user actor
+                action=ScanAction.SCAN_COMPLETED,
+                resource_type="scan",
+                resource_id=scan.id,
+                details={  # type: ignore[arg-type]
+                    "finding_count": finding_count_total,
+                    "job_count": len(sibling_jobs),
+                },
+            )
+            return None
+
+        # DQ1: raw_findings exist → defer the terminal transition to the AI
+        # pipeline. Do NOT mutate scan.status here; the caller dispatches in a
+        # fresh session post-commit (orchestrator sets ANALYZING + LPUSH +
+        # audit), and the AIPipelineConsumer finalizes COMPLETED/PARTIAL.
+        return scan_id
+
+    async def _trigger_ai_pipeline_dispatch(
+        self, scan_id: UUID, org_uuid: UUID
+    ) -> None:
+        """Dispatch the AI pipeline in a fresh session (ADR-029 Q1 e.ii).
+
+        Mirrors ``_trigger_phase2_dispatch``: the completion session has
+        already committed (job status + findings); this opens a new session,
+        sets the RLS GUC, and calls ``ScanOrchestrator.dispatch_ai_pipeline``
+        (ANALYZING + LPUSH + audit + commit). Fail-loud (Q8): on dispatch
+        failure mark the scan FAILED + ai_pipeline_degraded so it can never be
+        stranded pre-ANALYZING.
+        """
+        from app.services.orchestrator import ScanOrchestrator
+
+        try:
+            async with self._session_factory() as dispatch_session:
+                await dispatch_session.execute(
+                    text(f"SET app.current_org_id = '{org_uuid}'")
+                )
+                orchestrator = ScanOrchestrator(dispatch_session, self._redis)
+                await orchestrator.dispatch_ai_pipeline(scan_id=scan_id)
+        except Exception:
+            logger.exception(
+                "ai-pipeline dispatch failed for scan_id=%s — marking FAILED",
+                scan_id,
+            )
+            async with self._session_factory() as fail_session:
+                await fail_session.execute(
+                    text(f"SET app.current_org_id = '{org_uuid}'")
+                )
+                fail_scan = await fail_session.get(Scan, scan_id)
+                if fail_scan is not None:
+                    fail_scan.status = ScanStatus.FAILED
+                    fail_scan.ai_pipeline_degraded = True
+                    await fail_session.commit()

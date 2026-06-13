@@ -728,3 +728,56 @@ class ScanOrchestrator:
                 },  # type: ignore[arg-type]
             )
         await self.db.commit()
+
+    # AI pipeline queue (ADR-029 Q1 e.ii). Distinct from the per-priority
+    # ScanQueue lists — a single list the in-api AIPipelineConsumer BRPOPs.
+    AI_PIPELINE_QUEUE = "shieldscan:ai_pipeline"
+
+    async def dispatch_ai_pipeline(self, *, scan_id: UUID) -> None:
+        """Transition a scan to ANALYZING and enqueue it for the AI pipeline.
+
+        ADR-029 Q1 e.ii: invoked by completions_consumer in a fresh session
+        (sequential per Q7 c.ii) once all jobs are terminal AND raw_findings
+        exist. Mirrors ``dispatch_phase2`` — orchestrator owns the writes:
+        status → ANALYZING, LPUSH {scan_id, organization_id} onto
+        ``shieldscan:ai_pipeline`` (org_id travels in the payload so the
+        consumer can set its RLS GUC before loading the scan), and emits the
+        SCAN_DISPATCHED_AI_PIPELINE audit. Self-contained commit.
+
+        The terminal COMPLETED/PARTIAL transition + SCAN_COMPLETED audit are
+        the AIPipelineConsumer's responsibility after the pipeline runs (DQ2 /
+        DQ5).
+        """
+        scan = await self.db.get(Scan, scan_id)
+        if scan is None:
+            raise RuntimeError(f"scan {scan_id} not found at dispatch_ai_pipeline")
+
+        scan.status = ScanStatus.ANALYZING
+        await self.db.flush()
+
+        await audit(
+            self.db,
+            organization_id=scan.organization_id,
+            actor_id=None,  # system-driven (consumer context), no user actor
+            action=ScanAction.SCAN_DISPATCHED_AI_PIPELINE,
+            resource_type="scan",
+            resource_id=scan.id,
+            details={
+                "scan_type": scan.scan_type.value,
+                "priority": scan.priority,
+                "phase": "ai_pipeline",
+            },  # type: ignore[arg-type]
+        )
+        await self.db.commit()
+
+        # Enqueue after commit — the ANALYZING transition is durable before the
+        # consumer can pick the work up. Fire-and-forget LPUSH (ADR-014).
+        await self.queue.redis.lpush(
+            self.AI_PIPELINE_QUEUE,
+            json.dumps(
+                {
+                    "scan_id": str(scan_id),
+                    "organization_id": str(scan.organization_id),
+                }
+            ),
+        )

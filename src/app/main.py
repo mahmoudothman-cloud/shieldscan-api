@@ -35,6 +35,7 @@ from app.routes import mobile as mobile_routes
 from app.routes import projects as projects_routes
 from app.routes import scans as scans_routes
 from app.services.ai.clients import init_ai_clients, shutdown_ai_clients
+from app.services.ai_pipeline_consumer import AIPipelineConsumer
 from app.services.completions_consumer import CompletionsConsumer
 
 logger = logging.getLogger(__name__)
@@ -67,9 +68,18 @@ async def lifespan(app: FastAPI):
     )
     await completions_consumer.start()
 
+    # AI pipeline consumer (ADR-029 Q1 e.ii). Drains shieldscan:ai_pipeline
+    # and runs the AI pipeline per scan; started after the completions
+    # consumer, stopped before it (reverse-order teardown).
+    ai_pipeline_consumer = AIPipelineConsumer(
+        session_factory=AsyncSessionLocal, redis=redis
+    )
+    await ai_pipeline_consumer.start()
+
     try:
         yield
     finally:
+        await ai_pipeline_consumer.stop()
         await completions_consumer.stop()
         await shutdown_ai_clients()
         await close_redis()
