@@ -161,6 +161,36 @@ async def fake_redis():
 
 
 @pytest_asyncio.fixture
+async def session_factory(db_session):
+    """A session factory bound to the SAME connection as the test's
+    ``db_session`` fixture, so background-task consumers (CompletionsConsumer,
+    AIPipelineConsumer) can open fresh per-message sessions on the per-test
+    event loop with SET ROLE + SET app.current_org_id + committed visibility
+    all lined up. Production uses the global ``AsyncSessionLocal``.
+
+    Shared here for any consumer test; ``test_completions_consumer.py`` keeps
+    its own identical local copy (a local fixture overrides this one there).
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession as _S
+
+    connection = db_session.bind  # AsyncConnection (test owns lifecycle)
+
+    class _Factory:
+        async def __aenter__(self):
+            self._session = _S(bind=connection, expire_on_commit=False)
+            return self._session
+
+        async def __aexit__(self, *exc):
+            await self._session.close()
+            # Don't close the connection — db_session owns it.
+
+    def _factory():
+        return _Factory()
+
+    return _factory
+
+
+@pytest_asyncio.fixture
 async def email_service_stub():
     """Fresh ConsoleEmailService per test — outbox starts empty."""
     from app.services.email import ConsoleEmailService, reset_default_service
