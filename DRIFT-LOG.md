@@ -9,6 +9,20 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-06-16 — Drift #64 + #65 RESOLVED + #66-averted (M9.0 AI Pipeline Foundation; ADR-029)
+
+Persistent-catalogue sync for the M9.0 lifecycle (closure documented at Stage 1 design doc `a46fedd` §9 + ADR-029 SPEC §13 `45dcabe`; resolving code at api `51b26ea`). Lands here at M9.0 Stage 4 P5.A per the M8.1β.2 V-CC reconciliation precedent (catalogue → persistent DRIFT-LOG at P5.A).
+
+**Drift #64 — `ai_api_calls` absence (Drift #60 catch-class 4th-instance: stored-design-intent-with-unimplemented-mechanism).** CLAUDE.md Gotcha 5 mandates per-call AI cost logging to an `ai_api_calls` table + per-scan budget + circuit breaker; V-EE (M9.0 entry) surfaced zero infrastructure. **Resolution:** M9.0 Stage 3 C1 (`51b26ea`) — `ai_api_calls` table (TenantMixin RLS; registered in `app.db.policies.TENANT_TABLES`) + `AIAPICall` model + `app.services.ai.cost_tracking` (per-scan SUM aggregate + hybrid pre/post-call budget check + hardcoded SPEC §8.5 ScanType budgets). Catch-class lineage: #54 (source-ingest) + #58 (AttackSurface consumer) + #60 (SCAN_TYPE_TOOLS orphans) + #64 (this).
+
+**Drift #65 — `Scan.executive_summary` absence (Drift #61 catch-class 5th-instance: concrete-empirical-field absence; sub-category 2nd-instance).** M9.7 plan-literal pseudo-code referenced `scan.executive_summary`; V-EE confirmed the field did not exist. **Resolution:** M9.0 Stage 3 C1 (`51b26ea`) — `Scan.executive_summary` Text nullable column (ADR-029 Q3 Hybrid; full Report architecture forward-pinned to M10). Sub-category lineage: #61 (`Scan.created_by_user_id`) + #65 (this).
+
+**Drift #66-averted — V-JJC predicted test-impact, DQ3 design choice averted (NO catalogue increment).** V-JJC pre-verification (M9.0 C2) predicted a Path β/γ test-impact-surface (Drift #63 catch-class extension) from the `_maybe_complete_scan` COMPLETED→ANALYZING interposition. The ratified DQ3 empty-raw_findings short-circuit preserved the old inline behavior for findings-free scans → **0 existing tests broke, 0 updates needed**. Per the averted-prediction discipline established at V-IIB/C1 (config field-name mismatch predicted + pseudo-code-grounding averted; no increment), no #66 catalogue increment. Documents the arc discipline-tier: pre-verification + ratification + design-choice → zero-execution-drift.
+
+**Cumulative session-tail framing-drift count: 65** (unchanged through M9.0 lifecycle; #64 + #65 were catalogued at M9.0 Stage 1, resolved in code at C1, synced here; #66 averted-not-incremented).
+
+**Cross-references:** shieldscan-docs `a46fedd` (design §9) + `45dcabe` (ADR-029) + `62499a3` (M9.0 P5.A docs annotations); shieldscan-api `51b26ea` (C1 resolution) + `1c98330` (C2; DQ3) + `8410df4` (C3 tests); CLAUDE.md Gotcha 5 (Drift #64 driver) + Gotcha 3 (ai_api_calls RLS).
+
 ### 2026-05-03 — Findings-ingest task closes (ADR-024 §3.2 + ADR-017 Task 5.5)
 
 **Two carry-forward concerns closed by this commit:**
