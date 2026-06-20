@@ -174,7 +174,7 @@ async def test_consumer_marks_failed_and_degraded_on_pipeline_error(
     async def _boom(*, db, scan_id):
         raise RuntimeError("pipeline blew up")
 
-    monkeypatch.setattr(consumer_mod, "run_no_op", _boom)
+    monkeypatch.setattr(consumer_mod, "run", _boom)
 
     c = AIPipelineConsumer(session_factory=session_factory, redis=fake_redis)
     await c._process(_payload(org, scan))  # _process swallows + routes to _fail_scan

@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
 from sqlalchemy.sql import text
+
+from app.services.ai import pipeline as pipeline_mod
 
 from app.models.audit import AuditLog
 from app.models.identity import Membership, MembershipRole, Organization, User
@@ -31,6 +35,32 @@ from app.services.audit import ScanAction
 from app.services.auth import hash_password
 from app.services.completions_consumer import CompletionsConsumer
 from tests.conftest import use_org
+
+
+@pytest.fixture
+def stub_ai_clients(monkeypatch):
+    """Stub OpenAI embeddings + in-memory Qdrant for the real M9.A pipeline.
+
+    M9.0 smoke tests now drive the real embed+dedup pipeline (ADR-030); without
+    initialized clients ``run()`` would fail. Canned 1536-dim vectors keep the
+    status-transition assertions intact (the single-finding promotion succeeds);
+    dedicated dedup/cluster coverage lands at Stage 3 C2.
+    """
+
+    class _Embeddings:
+        async def create(self, *, model, input):
+            return SimpleNamespace(
+                data=[SimpleNamespace(embedding=[0.1] * 1536) for _ in input],
+                usage=SimpleNamespace(prompt_tokens=8),
+            )
+
+    monkeypatch.setattr(
+        pipeline_mod,
+        "get_openai_client",
+        lambda: SimpleNamespace(embeddings=_Embeddings()),
+    )
+    qdrant = AsyncQdrantClient(location=":memory:")
+    monkeypatch.setattr(pipeline_mod, "get_qdrant_client", lambda: qdrant)
 
 
 async def _seed(db_session, *, job_statuses, with_findings):
@@ -134,7 +164,7 @@ async def _audit_actions(session_factory, org_id, scan_id):
 
 @pytest.mark.asyncio
 async def test_m9_smoke_completions_to_completed_via_ai_pipeline(
-    db_session, fake_redis, session_factory
+    db_session, fake_redis, session_factory, stub_ai_clients
 ):
     """Full happy path: terminal jobs + findings → ANALYZING dispatch → consumer
     → COMPLETED, with both SCAN_DISPATCHED_AI_PIPELINE and SCAN_COMPLETED."""
@@ -156,7 +186,7 @@ async def test_m9_smoke_completions_to_completed_via_ai_pipeline(
     payload = json.loads(msg[1])
     assert payload["scan_id"] == str(scan.id)
 
-    # Consumer drains → no-op → COMPLETED + SCAN_COMPLETED.
+    # Consumer drains → real embed+dedup → COMPLETED + SCAN_COMPLETED.
     ai_consumer = AIPipelineConsumer(session_factory=session_factory, redis=fake_redis)
     await ai_consumer._process(payload)
 
@@ -187,7 +217,7 @@ async def test_m9_smoke_empty_findings_fast_path(
 
 @pytest.mark.asyncio
 async def test_m9_smoke_partial_scan_still_dispatches(
-    db_session, fake_redis, session_factory
+    db_session, fake_redis, session_factory, stub_ai_clients
 ):
     """DQ1: dispatch fires whenever raw_findings exist (even with a failed job);
     consumer finalizes PARTIAL."""

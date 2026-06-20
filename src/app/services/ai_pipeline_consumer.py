@@ -11,7 +11,8 @@ Flow per scan (ADR-029 Q1 + DQ2 + DQ5):
   2. This consumer sets the RLS GUC from the payload org_id, loads the scan,
      and processes only if it is still ANALYZING (idempotency guard for
      re-delivered messages).
-  3. Runs the (no-op at M9.0) pipeline, then re-derives the terminal status
+  3. Runs the AI pipeline (M9.A embed+dedup; ADR-030), then re-derives the
+     terminal status
      from sibling ScanJobs (DQ2) — COMPLETED if all jobs completed, else
      PARTIAL — and emits the SCAN_COMPLETED audit (relocated here per DQ5).
   4. On failure: a fresh session marks the scan FAILED + ai_pipeline_degraded
@@ -31,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import text
 
 from app.models.scans import Scan, ScanJob, ScanStatus
-from app.services.ai.pipeline import run_no_op
+from app.services.ai.pipeline import run
 from app.services.audit import ScanAction, audit
 
 logger = logging.getLogger(__name__)
@@ -144,8 +145,8 @@ class AIPipelineConsumer:
             )
             return
 
-        # M9.0 no-op pipeline (Q11 C.c-lite). Real stages land at M9.A+.
-        await run_no_op(db=db, scan_id=scan_id)
+        # M9.A real pipeline: embed + dedup + Path C promotion (ADR-030).
+        await run(db=db, scan_id=scan_id)
 
         # DQ2: re-derive terminal status from sibling ScanJobs.
         jobs = (
