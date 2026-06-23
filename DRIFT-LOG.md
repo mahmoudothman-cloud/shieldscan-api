@@ -9,6 +9,24 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-06-23 — Drift #66 RESOLVED (M9.A Stage 3 C1; Resolution γ FK-ordering — ORM-vs-DB layer assumption mismatch; NOVEL catch-class)
+
+Persistent-catalogue sync for the M9.A lifecycle, landed here at M9.A Stage 4 P5.A per the M8.1β.2 V-CC reconciliation precedent (catalogue → persistent DRIFT-LOG at P5.A). M9.A closure documented at docs `c9130db` (IMPLEMENTATION-PLAN M9.A blockquote + Tasks 9.1/9.2 + design/plan Status frontmatter); ADR-030 canonical at SPEC §13 `d408b2c`.
+
+**Drift #66 — Resolution γ FK-ordering — ORM-vs-DB layer assumption mismatch (NOVEL catch-class; first instance in arc).** Surfaced at M9.A Stage 3 C1 (`91ec273`) test execution: an `asyncpg ForeignKeyViolationError` on the `raw_findings.vulnerability_id` → `vulnerabilities.id` FK.
+
+- **Root cause.** ADR-030 Q7 Resolution γ pre-generates the Vulnerability id via `uuid.uuid4()` to avoid an ORM-level flush-for-id round-trip. That removes the *ORM* need to flush — but the *DB-level* FK constraint still requires the Vulnerability row to be persisted **before** the `raw_finding` UPDATE that sets `vulnerability_id` is emitted. SQLAlchemy's unit-of-work cannot infer the UPDATE-depends-on-INSERT ordering without a `relationship()` bridging the two mappers; it emitted the raw_finding UPDATE first → FK violation.
+- **Resolution.** Intermediate `await db.flush()` inside `_create_vulnerability_from_finding` (`src/app/services/ai/pipeline.py`) before linking `raw_finding.vulnerability_id`. The Vulnerability INSERT persists; the FK resolves at the deferred final flush. The flush stays inside the consumer's single transaction (no mid-pipeline commit), so the Q7 atomic-same-flush intent holds at the outer transaction boundary (the AIPipelineConsumer owns the commit).
+- **Regression-guard.** `test_drift_66_fk_ordering_regression_guard` (`tests/services/ai/test_dedup_and_promote.py`, commit `251960a`) asserts the Vulnerability is queryable immediately after `_create_vulnerability_from_finding` (proving the intermediate flush) and that the raw_finding FK resolves at the final flush. A refactor reverting the fix fails this test.
+- **Catch-class lineage.** NOVEL — distinct from #59 (architectural-seam), #60 (model+spec orphan), #61 (DEFERRED-EMPIRICAL field naming), #62 (deferred-empirical conditional), #63 (test-impact-surface), #64 (ai_api_calls absence), #65 (Scan.executive_summary absence). All prior catches are *static* (field/contract/scope mismatches surfaced pre-execution or at predictable seams); #66 is the first *layer-assumption* catch — an ORM abstraction that is locally correct but violates a DB-level invariant only an execution-time flush reveals.
+- **Forward-pin extension.** When pre-generating UUIDs to avoid an intermediate flush, verify FK constraints across tables that require persisted-parent-before-child ordering: a `relationship()` bridge lets the unit-of-work infer order, but manual FK-column linking requires an explicit flush. Empirically grounded by Drift #66 at M9.A C1.
+
+**Disambiguation — "#66-averted lineage" vs Drift #66.** Prior arc-references to "#66-averted lineage" (V-JJC predicted-then-averted at M9.0 C2 + DQ3 design-choice-averted; V-MM/V-NNE averted at M9.A Stage 1; see the 2026-06-16 entry below) were documentation-shorthand for the **averted-prediction discipline lineage** — they used "#66" as a would-be-next-number placeholder and explicitly did **not** increment the count (it stayed 65). The #66 catalogue number is assigned **here** to the FK-ordering catch — the first real increment past 65. Future references should distinguish: "averted-prediction discipline lineage" (predicted-then-averted via design choices; no increment) vs "Drift #66" (catalogued NOVEL ORM-vs-DB layer assumption mismatch).
+
+**Cumulative session-tail framing-drift count: 66** (Drift #58-#66; +1 since M9.0 close — the FK-ordering catch is the first real increment past the 65 that held through M9.0).
+
+**Cross-references:** shieldscan-docs `aaf7ea0` (Stage 1 design) + `a8ad52c` (Stage 2 plan) + `d408b2c` (ADR-030 SPEC §13) + `c9130db` (M9.A P5.A docs annotations); shieldscan-api `91ec273` (C1 impl; Drift #66 surfaced + resolved) + `251960a` (C2 tests + regression-guard) + `4616672` (M9.0 P5.A api DRIFT-LOG #64/#65 precedent); shieldscan-engine `6254849` (M9.0 P5.A engine DRIFT-LOG; #66 cross-ref at the forthcoming P5.A engine commit); SPEC §13 ADR-030 (M9.A architectural authority).
+
 ### 2026-06-16 — Drift #64 + #65 RESOLVED + #66-averted (M9.0 AI Pipeline Foundation; ADR-029)
 
 Persistent-catalogue sync for the M9.0 lifecycle (closure documented at Stage 1 design doc `a46fedd` §9 + ADR-029 SPEC §13 `45dcabe`; resolving code at api `51b26ea`). Lands here at M9.0 Stage 4 P5.A per the M8.1β.2 V-CC reconciliation precedent (catalogue → persistent DRIFT-LOG at P5.A).
