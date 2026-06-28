@@ -115,6 +115,16 @@ class Vulnerability(Base, TimestampMixin, TenantMixin):
     raw_finding_ids: Mapped[list[UUID] | None] = mapped_column(
         ARRAY(PgUUID(as_uuid=True)), nullable=True
     )
+    # --- ADR-031 M9.B AI pipeline: correlation + scoring ---
+    # Q8: union-find cluster grouping id for cross-layer correlation (Path B link;
+    # not a FK — a cluster-grouping UUID). Indexed for the Y2 vulnerability_count
+    # DISTINCT(correlation_cluster_id) adapter.
+    correlation_cluster_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True, index=True
+    )
+    # Q11: composite SPEC §8.3 final_score (base_cvss × corroboration ×
+    # exploitability, capped 10.0). Not indexed — M10 ranking index forward-pinned.
+    severity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Evidence(Base, TimestampMixin, TenantMixin):
