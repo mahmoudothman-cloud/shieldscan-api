@@ -19,6 +19,7 @@ from app.models.identity import Organization
 from app.models.projects import Project
 from app.models.raw_findings import EngineCategory, RawFinding, Severity
 from app.models.scans import Scan, ScanStatus, ScanType
+from app.models.vulnerabilities import Vulnerability
 from app.services.ai import pipeline as pipeline_mod
 from tests.conftest import use_org
 
@@ -149,3 +150,34 @@ async def add_raw_finding(db_session, scan, org, **overrides):
     db_session.add(finding)
     await db_session.flush()
     return finding
+
+
+# ---------------------------------------------------------------- M9.B helper
+
+
+async def add_vulnerability(db_session, scan, org, project, **overrides):
+    """Seed one Vulnerability row (M9.B correlation/scoring input).
+
+    Plain helper (not a fixture) so it is importable from any test directory —
+    the cross_engine_vulnerabilities / single_engine_vulnerabilities fixtures
+    live next to their consumer in tests/integration/test_m9b_smoke.py (fixtures
+    do not cross sibling conftest directories).
+    """
+    fields = dict(
+        organization_id=org.id,
+        project_id=project.id,
+        scan_id=scan.id,
+        title="Vuln",
+        severity=Severity.HIGH,
+        finding_type="sqli",
+        engine_category=EngineCategory.DAST,
+        cwe_id="CWE-89",
+        cvss_score=8.0,
+        parameter="userid",
+        fingerprint=uuid4().hex,
+    )
+    fields.update(overrides)
+    vuln = Vulnerability(**fields)
+    db_session.add(vuln)
+    await db_session.flush()
+    return vuln
