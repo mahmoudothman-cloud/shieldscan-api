@@ -45,7 +45,21 @@ from app.models.raw_findings import RawFinding
 from app.models.scans import Scan
 from app.models.vulnerabilities import Vulnerability
 from app.services.ai.clients import get_openai_client, get_qdrant_client
+from app.services.ai.correlation import (
+    CORRELATION_THRESHOLD,
+    build_route_map,
+    correlation_score,
+    iter_cross_engine_pairs,
+    union_find_clusters,
+)
 from app.services.ai.cost_tracking import log_ai_call
+from app.services.ai.cwe_hierarchy import get_cwe_hierarchy
+from app.services.ai.scoring import (
+    _map_score_to_severity_enum,
+    compute_corroboration_multiplier,
+    compute_exploitability_multiplier,
+    compute_severity_score,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -339,13 +353,128 @@ async def _dedup_and_promote(
         await _upsert_finding(client, collection, point_id, vector, scan, finding, vuln)
 
 
+async def _correlate_vulnerabilities(*, db: AsyncSession, scan_id: UUID) -> None:
+    """Cross-layer correlation pass (ADR-031 Q1-Q8 + Q12; SPEC §8.2).
+
+    Scores cross-engine Vulnerability pairs, clusters threshold-crossing pairs via
+    union-find (Path B link — no row deletion), and writes correlation_cluster_id +
+    corroborated_count (engine-distinct within the cluster). Defensive skip when the
+    scan has <2 distinct engine_categories (no cross-engine pair is possible).
+    """
+    vulnerabilities = (
+        (await db.execute(select(Vulnerability).where(Vulnerability.scan_id == scan_id)))
+        .scalars()
+        .all()
+    )
+    if len({v.engine_category for v in vulnerabilities}) < 2:
+        return  # Q13 C defensive skip
+
+    # Q1 hybrid: correlate over each vuln's representative raw_finding, which
+    # carries the §8.2 evidence fields (parameter / code_file / target_url /
+    # code_snippet). The promoted Vulnerability row does not denormalise those at
+    # M9.A, so reading them off the raw_finding is required; fall back to the
+    # Vulnerability row itself when a finding is unavailable.
+    rep_ids = {v.raw_finding_ids[0] for v in vulnerabilities if v.raw_finding_ids}
+    findings_by_id: dict[UUID, RawFinding] = {}
+    if rep_ids:
+        rows = (
+            (await db.execute(select(RawFinding).where(RawFinding.id.in_(rep_ids))))
+            .scalars()
+            .all()
+        )
+        findings_by_id = {r.id: r for r in rows}
+
+    reps = {
+        v.id: (findings_by_id.get(v.raw_finding_ids[0]) if v.raw_finding_ids else None)
+        for v in vulnerabilities
+    }
+    evidence = {v.id: (reps[v.id] or v) for v in vulnerabilities}
+    snippets = {
+        v.id: (reps[v.id].code_snippet if reps[v.id] is not None else None)
+        for v in vulnerabilities
+    }
+
+    cwe_hierarchy = get_cwe_hierarchy()
+    route_map = build_route_map(evidence.values())
+    correlated_pairs: list[tuple[Vulnerability, Vulnerability]] = []
+    for vuln_a, vuln_b in iter_cross_engine_pairs(vulnerabilities):
+        score = correlation_score(
+            evidence[vuln_a.id],
+            evidence[vuln_b.id],
+            route_map=route_map,
+            cwe_hierarchy=cwe_hierarchy,
+            snippet_a=snippets[vuln_a.id],
+            snippet_b=snippets[vuln_b.id],
+        )
+        if score >= CORRELATION_THRESHOLD:
+            correlated_pairs.append((vuln_a, vuln_b))
+
+    if not correlated_pairs:
+        return
+    for _cluster_id, members in union_find_clusters(
+        vulnerabilities, correlated_pairs
+    ).items():
+        engine_count = len({v.engine_category for v in members})
+        for vuln in members:
+            vuln.correlation_cluster_id = _cluster_id
+            vuln.corroborated_count = engine_count
+
+
+async def _score_vulnerabilities(*, db: AsyncSession, scan_id: UUID) -> None:
+    """Severity scoring pass (ADR-031 Q9-Q11; SPEC §8.3).
+
+    Computes final_score = base_cvss × corroboration × exploitability per
+    Vulnerability and writes severity_score + the mapped severity enum. Reads
+    corroborated_count set by the correlation pass (Q12) for the corroboration
+    multiplier; derives exploitability from the contributing raw_findings'
+    tool_name (Q10 PoC-derivation).
+    """
+    vulnerabilities = (
+        (await db.execute(select(Vulnerability).where(Vulnerability.scan_id == scan_id)))
+        .scalars()
+        .all()
+    )
+    if not vulnerabilities:
+        return
+
+    finding_ids = {
+        fid for v in vulnerabilities if v.raw_finding_ids for fid in v.raw_finding_ids
+    }
+    tool_by_finding: dict[UUID, str] = {}
+    if finding_ids:
+        rows = (
+            (await db.execute(select(RawFinding).where(RawFinding.id.in_(finding_ids))))
+            .scalars()
+            .all()
+        )
+        tool_by_finding = {r.id: r.tool_name for r in rows}
+
+    for vuln in vulnerabilities:
+        tool_names = [
+            tool_by_finding[fid]
+            for fid in (vuln.raw_finding_ids or [])
+            if fid in tool_by_finding
+        ]
+        corroboration = compute_corroboration_multiplier(vuln.corroborated_count)
+        exploitability = compute_exploitability_multiplier(tool_names)
+        score = compute_severity_score(
+            base_cvss=vuln.cvss_score,
+            corroboration_multiplier=corroboration,
+            exploitability_multiplier=exploitability,
+        )
+        vuln.severity_score = score
+        vuln.severity = _map_score_to_severity_enum(score)
+
+
 async def run(*, db: AsyncSession, scan_id: UUID) -> None:
-    """Execute the M9.A embedding + dedup pipeline for one scan (ADR-030).
+    """Execute the AI pipeline for one scan: embed + dedup (M9.A ADR-030) →
+    correlate + score (M9.B ADR-031).
 
     Side-effect only (PY3): Vulnerability rows + raw_finding promotion state +
-    ai_api_calls + Qdrant points, with a single atomic flush at the end
-    (Q7 B.a). The consumer commits + drives the terminal transition. Raises on
-    unrecoverable errors (PY4).
+    ai_api_calls + Qdrant points + correlation_cluster_id / corroborated_count /
+    severity_score updates, with a single atomic flush at the end (Q7 B.a). The
+    consumer commits + drives the terminal transition. Raises on unrecoverable
+    errors (PY4).
     """
     scan = await db.get(Scan, scan_id)
     if scan is None:
@@ -372,6 +501,10 @@ async def run(*, db: AsyncSession, scan_id: UUID) -> None:
     await _dedup_and_promote(
         db=db, scan=scan, raw_findings=raw_findings, embeddings=embeddings
     )
+    # M9.B (ADR-031 Q13): correlate cross-engine Vulnerabilities, then score.
+    # Sequential composition; both operate on the Vulnerabilities promoted above.
+    await _correlate_vulnerabilities(db=db, scan_id=scan_id)
+    await _score_vulnerabilities(db=db, scan_id=scan_id)
     # Q7 B.a: final flush of the raw_finding link UPDATEs. Vulnerability INSERTs
     # are flushed eagerly per-create (FK ordering; D-deviation #1) but all within
     # this one transaction — the consumer owns the single commit.
