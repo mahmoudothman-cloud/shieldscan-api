@@ -9,6 +9,27 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-06-29 — M9.B Sub-Milestone CLOSED — Cumulative Drift Count Preserved at 66 (no Drift #67)
+
+M9.B (AI Pipeline: Correlation + Scoring; ADR-031) closed its entire lifecycle with **zero catalogue increments**. This is a closure note, **not** a drift entry — Drift #66 (M9.A C1; the 2026-06-23 entry below) remains the latest catalogued drift. Logged here at M9.B Stage 4 P5.A per the M8.1β.2 V-CC reconciliation precedent (api+engine DRIFT-LOG sync at P5.A). Docs closure at `42259cf`; ADR-031 canonical at SPEC §13 `fb4b07e`.
+
+**M9.B 9-commit chain (all outcomes γ):** Stage 1 design `d10be51` + Stage 2 plan `a172fd1` + Stage 3 C0 ADR-031 `fb4b07e` + C1 schema/modules `5dee684` + C2 pipeline integration `6c9e270` + C3 tests/smoke `f82c38a` + Stage 4 P5.A (`42259cf` docs + this api entry + the engine cross-ref).
+
+**Why no Drift #67 — the three mitigations that held the line:**
+- **PY5 (V-UUE tool_name DEFERRED-EMPIRICAL pre-grounding).** Stage 1 §9 pre-grounded that `RawFinding` has `tool_name`, not `engine_name`; carried into `scoring.py` `POC_PROVEN_TOOL_NAMES` at C1. Averted a Drift #61-class concrete-field catch at execution (mirrors V-NNE project_id at M9.A).
+- **PY6 (Drift #66-class lower-risk assessment).** `correlation_cluster_id` + `severity_score` are standalone columns with no cross-table FK, so the M9.A C1 ORM-vs-DB FK-ordering hazard (Drift #66) cannot recur. Validated empirically at V-WWI; the migration is a clean `ALTER TABLE ADD COLUMN`.
+- **Test-gate discipline (within-lock under-implementation classification).** Two in-flight implementation gaps were caught by the commit-gate tests and corrected pre-commit, each *within* an existing Y-lock — neither a Y-lock deviation, neither a catalogue increment:
+  1. **C2 Q1 evidence-loading** (`6c9e270`): the first pass read correlation evidence (parameter/code_file) off the promoted Vulnerability rows, which M9.A leaves null. The e2e test caught the resulting non-correlation; corrected to load the representative `RawFinding` evidence (with a fall-back to the Vulnerability row) — exactly what Q1 already mandates ("loads raw_finding fields via raw_finding_ids join").
+  2. **C3 fixture-scoping** (`f82c38a`): the `cross_engine_vulnerabilities` / `single_engine_vulnerabilities` fixtures were first placed in `tests/services/ai/conftest.py`, but their consumer `test_m9b_smoke.py` is in `tests/integration/` — pytest fixtures don't cross sibling conftest directories. The collection gate caught it; corrected by relocating the fixtures into the smoke file (built on the importable conftest helpers). Q15 B.a fixtures still delivered + consumed.
+
+  These establish a **2-instance test-gate-within-lock pattern**: pre-commit test catches that surface implementation gaps *within* existing Y-locks are corrected and reported transparently, but are **not** framing-drift increments (distinct from Drift #66, which was a design-lock assumption — Resolution γ — failing against the DB).
+
+**6-instance averted-prediction lineage:** V-IIB (M9.0 C1 config UPPERCASE) + V-JJC (M9.0 C2 DQ3 test-impact) + V-MM (M9.A Stage 1 merge_evidence) + V-NNE (M9.A Stage 1 §9 project_id) + V-UUE (M9.B Stage 1 §9 tool_name) + V-VV/V-WW/V-XX/V-YY (M9.B Stages 2-3 pre-verification cascade).
+
+**Cumulative session-tail framing-drift count: 66** (Drift #58-#66; Drift #66 NOVEL ORM-vs-DB layer assumption mismatch from M9.A C1; unchanged through the entire M9.B lifecycle).
+
+**Cross-references:** shieldscan-docs `d10be51` + `a172fd1` + `fb4b07e` + `42259cf` (M9.B P5.A docs); shieldscan-api `f82c38a` + `6c9e270` + `5dee684` + `cee75bf` (M9.A P5.A api DRIFT-LOG precedent); shieldscan-engine `99f04e7` (M9.A P5.A engine DRIFT-LOG; M9.B cross-ref at the forthcoming P5.A engine commit); SPEC §13 ADR-031 (M9.B architectural authority).
+
 ### 2026-06-23 — Drift #66 RESOLVED (M9.A Stage 3 C1; Resolution γ FK-ordering — ORM-vs-DB layer assumption mismatch; NOVEL catch-class)
 
 Persistent-catalogue sync for the M9.A lifecycle, landed here at M9.A Stage 4 P5.A per the M8.1β.2 V-CC reconciliation precedent (catalogue → persistent DRIFT-LOG at P5.A). M9.A closure documented at docs `c9130db` (IMPLEMENTATION-PLAN M9.A blockquote + Tasks 9.1/9.2 + design/plan Status frontmatter); ADR-030 canonical at SPEC §13 `d408b2c`.
