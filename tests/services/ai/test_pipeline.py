@@ -132,10 +132,16 @@ async def test_run_429_rule_based_fingerprint_fallback(db_session, monkeypatch):
     assert scan.ai_pipeline_degraded is True
     # Fallback still promotes (degraded-but-complete; SPEC §8.6 resilience).
     assert await _count_vulns(db_session, scan.id) == 2
-    # No embedding cost logged when the batch never succeeds.
+    # No embedding cost logged when the batch never succeeds (M9.C narrowing:
+    # assertion filters operation_type == "embedding"; fix-gen + summary rows
+    # produced by the M9.C composition extension are separate operation_types and
+    # are legitimately logged as cost_usd=0 failure markers per Q5 C.b).
     logged = (
         await db_session.execute(
-            select(func.count(AIAPICall.id)).where(AIAPICall.scan_id == scan.id)
+            select(func.count(AIAPICall.id)).where(
+                AIAPICall.scan_id == scan.id,
+                AIAPICall.operation_type == "embedding",
+            )
         )
     ).scalar_one()
     assert logged == 0

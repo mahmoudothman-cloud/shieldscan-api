@@ -54,12 +54,14 @@ from app.services.ai.correlation import (
 )
 from app.services.ai.cost_tracking import log_ai_call
 from app.services.ai.cwe_hierarchy import get_cwe_hierarchy
+from app.services.ai.fix_generation import _generate_fixes
 from app.services.ai.scoring import (
     _map_score_to_severity_enum,
     compute_corroboration_multiplier,
     compute_exploitability_multiplier,
     compute_severity_score,
 )
+from app.services.ai.summary import _generate_executive_summary
 
 logger = logging.getLogger(__name__)
 
@@ -468,13 +470,13 @@ async def _score_vulnerabilities(*, db: AsyncSession, scan_id: UUID) -> None:
 
 async def run(*, db: AsyncSession, scan_id: UUID) -> None:
     """Execute the AI pipeline for one scan: embed + dedup (M9.A ADR-030) →
-    correlate + score (M9.B ADR-031).
+    correlate + score (M9.B ADR-031) → fix-gen + executive summary (M9.C ADR-032).
 
     Side-effect only (PY3): Vulnerability rows + raw_finding promotion state +
     ai_api_calls + Qdrant points + correlation_cluster_id / corroborated_count /
-    severity_score updates, with a single atomic flush at the end (Q7 B.a). The
-    consumer commits + drives the terminal transition. Raises on unrecoverable
-    errors (PY4).
+    severity_score updates + ai_fix_text / executive_summary, with a single atomic
+    flush at the end (Q7 B.a). The consumer commits + drives the terminal
+    transition. Raises on unrecoverable errors (PY4).
     """
     scan = await db.get(Scan, scan_id)
     if scan is None:
@@ -505,6 +507,11 @@ async def run(*, db: AsyncSession, scan_id: UUID) -> None:
     # Sequential composition; both operate on the Vulnerabilities promoted above.
     await _correlate_vulnerabilities(db=db, scan_id=scan_id)
     await _score_vulnerabilities(db=db, scan_id=scan_id)
+    # M9.C (ADR-032 Q13): generate per-vuln AI fixes (Path A), then the scan
+    # executive summary. Sequential; both read the scored Vulnerabilities above and
+    # write ai_fix_text / executive_summary within this same transaction.
+    await _generate_fixes(db=db, scan_id=scan_id)
+    await _generate_executive_summary(db=db, scan_id=scan_id)
     # Q7 B.a: final flush of the raw_finding link UPDATEs. Vulnerability INSERTs
     # are flushed eagerly per-create (FK ordering; D-deviation #1) but all within
     # this one transaction — the consumer owns the single commit.
