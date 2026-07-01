@@ -13,6 +13,7 @@ from uuid import uuid4
 import httpx
 import openai
 import pytest
+from anthropic.types import Message, TextBlock, Usage
 from qdrant_client import AsyncQdrantClient
 
 from app.models.identity import Organization
@@ -20,6 +21,7 @@ from app.models.projects import Project
 from app.models.raw_findings import EngineCategory, RawFinding, Severity
 from app.models.scans import Scan, ScanStatus, ScanType
 from app.models.vulnerabilities import Vulnerability
+from app.services.ai import fix_generation as fixgen_mod
 from app.services.ai import pipeline as pipeline_mod
 from tests.conftest import use_org
 
@@ -91,6 +93,78 @@ def stub_ai_clients(monkeypatch):
     fake = install_openai(monkeypatch, FakeEmbeddings())
     qdrant = install_qdrant(monkeypatch)
     return SimpleNamespace(openai=fake, qdrant=qdrant)
+
+
+# ---------------------------------------------------------------- M9.C Anthropic
+
+
+def make_anthropic_response(
+    text: str, *, input_tokens: int = 1500, output_tokens: int = 500
+) -> Message:
+    """Build a real ``anthropic.types.Message`` (Q14 B.b; V-CCE construction shape)."""
+    return Message(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-sonnet-4-6",
+        content=[TextBlock(type="text", text=text)],
+        usage=Usage(input_tokens=input_tokens, output_tokens=output_tokens),
+        stop_reason="end_turn",
+        stop_sequence=None,
+    )
+
+
+class _StubAnthropicMessages:
+    """``client.messages`` stub driven by a side-effect list (Q14 C.b).
+
+    Each entry is either a ``Message`` (returned) or an ``Exception`` (raised) —
+    so a list like ``[err, err, response]`` exercises retry-then-success and
+    ``[err, err, err]`` exercises retry-exhausted. ``calls`` records kwargs.
+    """
+
+    def __init__(self, responses: list):
+        self._responses = list(responses)
+        self._index = 0
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._index >= len(self._responses):
+            raise IndexError("stub_anthropic: side-effect list exhausted")
+        item = self._responses[self._index]
+        self._index += 1
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class _StubAnthropicClient:
+    """Minimal AsyncAnthropic stand-in exposing ``.messages`` (Q14)."""
+
+    def __init__(self, responses: list):
+        self.messages = _StubAnthropicMessages(responses)
+
+
+def install_anthropic(monkeypatch, responses: list) -> _StubAnthropicClient:
+    """Patch ``fix_generation.get_anthropic_client`` to the stub client.
+
+    V-CCF: ``get_anthropic_client`` is name-bound only in ``fix_generation``;
+    ``summary`` routes through ``fix_generation._call_claude_with_retry``, so this
+    single patch covers both stages. Returns the client (inspect ``.messages.calls``).
+    """
+    client = _StubAnthropicClient(responses)
+    monkeypatch.setattr(fixgen_mod, "get_anthropic_client", lambda: client)
+    return client
+
+
+@pytest.fixture
+def stub_anthropic(monkeypatch):
+    """Return an installer: ``stub_anthropic([resp, ...])`` → stub client (Q14 A.a)."""
+
+    def _install(responses: list) -> _StubAnthropicClient:
+        return install_anthropic(monkeypatch, responses)
+
+    return _install
 
 
 # ---------------------------------------------------------------- DB seeding
