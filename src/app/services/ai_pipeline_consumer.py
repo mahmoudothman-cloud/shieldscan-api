@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy import select
@@ -122,12 +123,12 @@ class AIPipelineConsumer:
                 # matching the completions_consumer convention.
                 await db.execute(text(f"SET app.current_org_id = '{org_uuid}'"))
                 await self._run_pipeline_and_finalize(db, scan_id)
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "ai-pipeline failed for scan_id=%s — marking FAILED + degraded",
                 scan_id,
             )
-            await self._fail_scan(scan_id, org_uuid)
+            await self._fail_scan(scan_id, org_uuid, error=str(exc))
 
     async def _run_pipeline_and_finalize(
         self, db: AsyncSession, scan_id: UUID
@@ -154,6 +155,16 @@ class AIPipelineConsumer:
         ).scalars().all()
         any_failed = any(j.status in _TERMINAL_FAILED for j in jobs)
         scan.status = ScanStatus.PARTIAL if any_failed else ScanStatus.COMPLETED
+        # M9.D (ADR-033 Q1/Q2): terminal metadata. completed_at at every consumer
+        # terminal transition; PARTIAL gets a job-failure summary, COMPLETED
+        # leaves error_message null.
+        scan.completed_at = datetime.now(timezone.utc)
+        if any_failed:
+            n_failed = sum(1 for j in jobs if j.status in _TERMINAL_FAILED)
+            scan.error_message = (
+                f"{n_failed} of {len(jobs)} scan jobs failed; "
+                "partial results available"
+            )
         await db.flush()
 
         # DQ5: SCAN_COMPLETED audit relocated here (post-pipeline terminal).
@@ -172,11 +183,15 @@ class AIPipelineConsumer:
         )
         await db.commit()
 
-    async def _fail_scan(self, scan_id: UUID, org_uuid: UUID) -> None:
+    async def _fail_scan(
+        self, scan_id: UUID, org_uuid: UUID, *, error: str | None = None
+    ) -> None:
         """Mark a scan FAILED + ai_pipeline_degraded in a fresh session (Q8).
 
         A pipeline crash must never strand a scan in ANALYZING. Best-effort:
         if even this fails, the loop has already logged the original error.
+        ``error`` carries the pipeline exception text for Scan.error_message
+        (M9.D ADR-033 Q2; threaded from the _process except handler).
         """
         try:
             async with self._session_factory() as fail_db:
@@ -187,6 +202,10 @@ class AIPipelineConsumer:
                 if scan is not None:
                     scan.status = ScanStatus.FAILED
                     scan.ai_pipeline_degraded = True
+                    # M9.D (ADR-033 Q1/Q2): FAILED is a consumer terminal
+                    # transition — stamp completed_at + record the failure.
+                    scan.completed_at = datetime.now(timezone.utc)
+                    scan.error_message = error
                     await fail_db.commit()
         except Exception:
             logger.exception(
