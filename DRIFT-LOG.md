@@ -9,6 +9,24 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-07-02 — M9.D Sub-Milestone CLOSED + 🔒 MILESTONE 9 ENTIRELY CLOSED — Cumulative Drift Count Preserved at 66 (no Drift #67)
+
+M9.D (AI Pipeline: Orchestrator; ADR-033) closed its entire lifecycle with **zero catalogue increments** — and with it **MILESTONE 9 (AI Analysis Pipeline) closes ENTIRELY**. This is a closure note, **not** a drift entry — Drift #66 (M9.A C1; the 2026-06-23 entry below) remains the latest catalogued drift. Docs closure at `2777ad4`; ADR-033 canonical at SPEC §13 `1583f27`.
+
+**M9.D chain (all outcomes γ):** Stage 1 design `988326e` (compressed; absorbs Stage 2 per Q5; 8 locks via Mode 2 brainstorming; adaptive Path δ SMALL classification via V-AA) + Stage 3 C0 ADR-033 `1583f27` (closure-by-composition; 4th consecutive C0 at 0 drifts) + C1 terminal-metadata wiring `5c092df` (completed_at at COMPLETED/PARTIAL/FAILED + error_message FAILED str(exc) via `_fail_scan(*, error)` threading + PARTIAL "N of M" summary) + C2 e2e smoke `2f155f0` (4 tests green first-run; suite 751 ZERO regressions) + Stage 4 P5.A (`2777ad4` docs + this api entry + the engine cross-ref).
+
+**🔒 MILESTONE 9 ENTIRELY CLOSED:** M9.0 (foundation; ADR-029) + M9.A (embed/dedup; ADR-030) + M9.B (correlate/score; ADR-031) + M9.C (fix-gen/summary; ADR-032; FIRST real Anthropic integration) + M9.D (orchestrator; ADR-033). Pipeline operational end-to-end: completions-event → dispatch → embed → dedup → correlate → score → fix-gen → summary → terminal metadata. 751 tests green; cost-tracking operational per Gotcha 5.
+
+**Why no Drift #67 — the mitigations that held the line:**
+- **V-AA adaptive pre-verification (SMALL classification).** Established the orchestration chain operational since M9.0 C2 / Task 4.2 — preventing a `run_ai_pipeline` duplication and an ADR-013 sole-writer violation; Task 9.7 pseudo-code superseded per the INFORMATIONAL-not-BINDING header.
+- **V-EE pre-C1 cascade.** The highest-value pre-grounded item (V-EEC) surfaced exactly as predicted — `_process` used a bare `except Exception:` (exception unbound) and `_fail_scan(scan_id, org_uuid)` didn't receive it; resolved within-lock pre-commit via an additive-safe keyword-only `error` param. 8th averted-prediction catch.
+- **Gate-2 discipline.** The M9.C Gate-1 fix-gen-throttle forward-pin honored through M9.D; fix_generation.py untouched; no closed artifact reopened.
+- **V-FF assertion-grounding.** C2 assertions grounded on C1's actual write-sites (exact PARTIAL f-string asserted verbatim) — 4 tests green first-run, zero test-authoring iterations.
+
+**8-instance averted-prediction lineage:** V-IIB + V-JJC + V-MM + V-NNE + V-UUE + V-VV/V-WW/V-XX/V-YY + V-BB 4-catch + V-CCF + **V-EEC (M9.D)**. **3-instance test-gate-within-lock pattern** — NOT incremented at M9.D (no test-gate catches).
+
+**Forward-pins on record:** webhooks → Task 12.5; CANCELED completed_at → routes-touch task; fix-gen throttle → production-readiness; autouse-anthropic-stub → production-readiness; stream-key TTL → OPS. ⇒ **M10 trigger: "Begin M10 — Report Architecture"**.
+
 ### 2026-07-02 — M9.C Sub-Milestone CLOSED — Cumulative Drift Count Preserved at 66 (no Drift #67)
 
 M9.C (AI Pipeline: Fix Generation + Executive Summary; ADR-032) closed its entire lifecycle with **zero catalogue increments**. This is a closure note, **not** a drift entry — Drift #66 (M9.A C1; the 2026-06-23 entry below) remains the latest catalogued drift. Logged here at M9.C Stage 4 P5.A per the M8.1β.2 V-CC reconciliation precedent (api+engine DRIFT-LOG sync at P5.A). Docs closure at `0a829cb`; ADR-032 canonical at SPEC §13 `e8fbd8c`. M9.C is the FIRST real Anthropic Claude API integration in the ShieldScan AI Pipeline; cost-tracking transitioned from architectural-readiness to operational-load per CLAUDE.md Gotcha 5.
