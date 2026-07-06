@@ -138,6 +138,16 @@ class ScanAction(str, PyEnum):
     SCAN_JOB_RETRIED = "scan.job.retried"  # M5+ worker retry policy
 
 
+class VulnerabilityAction(str, PyEnum):
+    """Vulnerability-domain audit events (M10.A Task 10.1).
+
+    Split per the established per-domain enum discipline (AuthAction →
+    ProjectAction → ScanAction lineage; anti-catch-all design pin).
+    """
+
+    VULNERABILITY_STATUS_CHANGED = "vulnerability.status_changed"  # M10.A PATCH endpoint; one row per actual transition (Q8)
+
+
 # Registry of all action-enum classes. Add new enums here as they
 # land (FindingAction, etc.) so the global-disjointness test
 # auto-covers them without manual updates.
@@ -145,6 +155,7 @@ ALL_ACTION_ENUMS: tuple[type[PyEnum], ...] = (
     AuthAction,
     ProjectAction,
     ScanAction,
+    VulnerabilityAction,
 )
 
 
@@ -181,7 +192,7 @@ async def audit(
     *,
     organization_id: UUID,
     actor_id: UUID | None,
-    action: AuthAction | ProjectAction | ScanAction,
+    action: AuthAction | ProjectAction | ScanAction | VulnerabilityAction,
     resource_type: str,
     resource_id: UUID | None = None,
     ip_address: str | None = None,

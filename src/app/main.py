@@ -34,6 +34,7 @@ from app.routes import auth as auth_routes
 from app.routes import mobile as mobile_routes
 from app.routes import projects as projects_routes
 from app.routes import scans as scans_routes
+from app.routes import vulnerabilities as vulnerabilities_routes
 from app.services.ai.clients import init_ai_clients, shutdown_ai_clients
 from app.services.ai_pipeline_consumer import AIPipelineConsumer
 from app.services.completions_consumer import CompletionsConsumer
@@ -146,3 +147,5 @@ app.include_router(projects_routes.router, prefix="/v1")
 app.include_router(mobile_routes.router, prefix="/v1")
 app.include_router(scans_routes.project_scans_router, prefix="/v1")
 app.include_router(scans_routes.scan_router, prefix="/v1")
+app.include_router(vulnerabilities_routes.router, prefix="/v1")
+app.include_router(vulnerabilities_routes.scan_vulns_router, prefix="/v1")
