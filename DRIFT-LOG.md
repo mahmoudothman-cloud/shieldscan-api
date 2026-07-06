@@ -9,6 +9,24 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-07-06 — M10.A Sub-Milestone CLOSED (first M10 sub-milestone) — Cumulative Drift Count Preserved at 66
+
+M10.A (Vulnerability Endpoints; Task 10.1) closed its entire lifecycle with **zero catalogue increments** — the first M10 sub-milestone, and the **first C0-less sub-milestone** in the arc (no ADR per DQ2 decomposition lock + no SPEC edit + no migration; VulnerabilityStatus + VulnerabilityHistory tables pre-existed scaffolded-unwired). This is a closure note, **not** a drift entry — Drift #66 (M9.A C1) remains the latest catalogued drift. Docs closure at `a4cca91`; lock-record at `df68e69`.
+
+**M10.A chain (all outcomes γ):** Stage 1 lock-record `df68e69` (10-lock light record per Q10; Mode-2 compressed) + Stage 3 C1 `5cc968a` (routes + schemas + registration) + C2 `0251ee7` (24 tests) + Stage 4 P5.A (`a4cca91` docs + this api entry + the engine cross-ref forthcoming).
+
+**Delivered:** all 7 SPEC §6 vulnerability operations tenancy-enforced (per-scan list + org-wide list + detail + PATCH + /evidence + /fix + /history; ADR-012 cross-tenant-404) + 24 tests (**777 total, ZERO regressions**); **FIRST VulnerabilityHistory write-site** at the PATCH handler (Q5); **ai_fix_text customer-reachable via /fix** — the M9 pipeline's fix output now has a demo-path endpoint; NEW **VulnerabilityAction** audit enum per the per-domain discipline.
+
+**Mitigations that prevented Drift #67:** the entry probe caught the Q1 scope delta (SPEC-canon 7 endpoints vs plan-literal 4) AND the Q2 engine_category/tool_name concrete-field ambiguity BEFORE design (V-UUE catch-class; resolved at lock time, not at implementation); the V-HH pre-C1 cascade resolved V-HHD exactly as pre-grounded (per-domain action-enum discipline → NEW VulnerabilityAction, not a ScanAction stretch; **9th averted-prediction catch**); V-II pre-C2 assertion-grounding on landed C1 artifacts; the RLS GUC seeding catch (Gotcha 12: `other_org_headers` flips the session-local `app.current_org_id`) resolved pre-commit as normal authoring workflow (NOT test-gate-within-lock class; source untouched).
+
+**Lineages:** 9-instance averted-prediction lineage (V-IIB → … → V-HHD VulnerabilityAction); 3-instance test-gate-within-lock pattern NOT incremented at M10.A (no test-gate catches).
+
+**Forward-pins carried:** tool-level engine filter (RawFinding join, on customer need); /fix tier-gating → billing milestone (SPEC §9: AI fix generation ✗ at Free); restricted status-transition graph → on business need; eager-PDF + reports-table territory ahead at M10.B per DQ3 (Y-REPORT-PERSISTENCE).
+
+⇒ Next per DQ5: ***"Begin M10.B — Report Generation + Delivery"*** (ADR-034 territory; Mode-1 full treatment).
+
+---
+
 ### 2026-07-02 — M9.D Sub-Milestone CLOSED + 🔒 MILESTONE 9 ENTIRELY CLOSED — Cumulative Drift Count Preserved at 66 (no Drift #67)
 
 M9.D (AI Pipeline: Orchestrator; ADR-033) closed its entire lifecycle with **zero catalogue increments** — and with it **MILESTONE 9 (AI Analysis Pipeline) closes ENTIRELY**. This is a closure note, **not** a drift entry — Drift #66 (M9.A C1; the 2026-06-23 entry below) remains the latest catalogued drift. Docs closure at `2777ad4`; ADR-033 canonical at SPEC §13 `1583f27`.
