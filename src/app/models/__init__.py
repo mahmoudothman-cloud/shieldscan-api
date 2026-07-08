@@ -14,6 +14,7 @@ from app.models import (  # noqa: F401
     projects,
     raw_findings,
     recon,
+    reports,
     scans,
     vulnerabilities,
 )
