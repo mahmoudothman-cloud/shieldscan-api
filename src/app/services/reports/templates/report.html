@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>ShieldScan Security Report</title>
+</head>
+<body>
+
+  {# ---------- Cover / branding (G5) ---------- #}
+  <section class="cover">
+    <div class="brand">ShieldScan</div>
+    <h1>Security Assessment Report</h1>
+    <table class="cover-meta">
+      <tr><th>Target</th><td>{{ ctx.scan.target_url or "—" }}</td></tr>
+      <tr><th>Scan type</th><td>{{ ctx.scan.scan_type.value }}</td></tr>
+      <tr><th>Status</th><td>{{ ctx.scan.status.value }}</td></tr>
+      <tr><th>Completed</th><td>{{ ctx.scan.completed_at.strftime("%Y-%m-%d %H:%M UTC") if ctx.scan.completed_at else "—" }}</td></tr>
+      <tr><th>Generated</th><td>{{ generated_at.strftime("%Y-%m-%d %H:%M UTC") }}</td></tr>
+    </table>
+  </section>
+
+  {# ---------- Executive summary (G5; M9.C business-language verbatim) ---------- #}
+  <section class="exec-summary">
+    <h2>Executive Summary</h2>
+    {% if ctx.scan.executive_summary %}
+      <p>{{ ctx.scan.executive_summary }}</p>
+    {% else %}
+      <p class="muted">No executive summary was generated for this scan.</p>
+    {% endif %}
+  </section>
+
+  {# ---------- Findings overview (G5; severity-count table) ---------- #}
+  <section class="overview">
+    <h2>Findings Overview</h2>
+    <table class="severity-table">
+      <thead>
+        <tr><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Info</th><th>Total</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="sev-critical">{{ severity_counts.critical }}</td>
+          <td class="sev-high">{{ severity_counts.high }}</td>
+          <td class="sev-medium">{{ severity_counts.medium }}</td>
+          <td class="sev-low">{{ severity_counts.low }}</td>
+          <td class="sev-info">{{ severity_counts.info }}</td>
+          <td class="total">{{ severity_counts.total }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  {# ---------- Per-vulnerability detail (G5; severity-ordered incl. ai_fix_text) ---------- #}
+  <section class="vulnerabilities">
+    <h2>Vulnerabilities</h2>
+    {% if not ctx.vulnerabilities %}
+      <p class="muted">No vulnerabilities were identified in this scan.</p>
+    {% endif %}
+    {% for v in ctx.vulnerabilities %}
+    <article class="vuln sev-border-{{ v.severity.value }}">
+      <h3>{{ loop.index }}. {{ v.title }}</h3>
+      <table class="vuln-meta">
+        <tr>
+          <th>Severity</th><td class="sev-{{ v.severity.value }}">{{ v.severity.value }}</td>
+          <th>CVSS</th><td>{{ v.cvss_score if v.cvss_score is not none else "—" }}</td>
+          <th>CWE</th><td>{{ v.cwe_id or "—" }}</td>
+        </tr>
+        <tr>
+          <th>Engine</th><td>{{ v.engine_category.value }}</td>
+          <th>Corroborated</th><td>{{ v.corroborated_count }}</td>
+          <th>Status</th><td>{{ v.status.value }}</td>
+        </tr>
+      </table>
+
+      {% if v.description %}
+      <div class="vuln-desc"><h4>Description</h4><p>{{ v.description }}</p></div>
+      {% endif %}
+
+      {% if v.ai_fix_text %}
+      <div class="vuln-fix"><h4>Recommended Fix</h4><p>{{ v.ai_fix_text }}</p></div>
+      {% endif %}
+
+      {% if v.evidence %}
+      <div class="vuln-evidence">
+        <h4>Evidence</h4>
+        {% for e in v.evidence %}
+        <div class="evidence-item">
+          <span class="tool">{{ e.tool_name }}</span>
+          <span class="loc">{{ e.target_url or e.code_file or "—" }}{% if e.code_line %}:{{ e.code_line }}{% endif %}</span>
+          {% if e.code_snippet %}<pre>{{ e.code_snippet }}</pre>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </section>
+
+  {# ---------- Mobile section (G5; conditional) ---------- #}
+  {% if mobile_present %}
+  <section class="mobile">
+    <h2>Mobile Findings</h2>
+    {% for v in ctx.vulnerabilities if v.mobile_os %}
+    <article class="mobile-vuln">
+      <h3>{{ v.title }}</h3>
+      <table class="vuln-meta">
+        <tr>
+          <th>Platform</th><td>{{ v.mobile_os }}</td>
+          <th>Permission</th><td>{{ v.mobile_permission or "—" }}</td>
+          <th>Component</th><td>{{ v.mobile_component_name or "—" }}</td>
+        </tr>
+      </table>
+    </article>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+</body>
+</html>

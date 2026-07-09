@@ -1,0 +1,72 @@
+/* ShieldScan PDF report stylesheet (M10.B C3; print-oriented for WeasyPrint). */
+
+@page {
+  size: A4;
+  margin: 2cm 1.8cm;
+  @bottom-center {
+    content: "ShieldScan — Confidential — Page " counter(page) " of " counter(pages);
+    font-size: 8pt;
+    color: #888;
+  }
+}
+
+body {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 10pt;
+  color: #1a1a1a;
+  line-height: 1.45;
+}
+
+h1 { font-size: 24pt; margin: 0 0 0.4cm; }
+h2 { font-size: 15pt; border-bottom: 2px solid #2b6cb0; padding-bottom: 3px; margin-top: 0.8cm; }
+h3 { font-size: 12pt; margin: 0.3cm 0 0.15cm; }
+h4 { font-size: 10pt; margin: 0.25cm 0 0.1cm; color: #444; text-transform: uppercase; letter-spacing: 0.5px; }
+
+.muted { color: #888; font-style: italic; }
+
+/* Cover */
+.cover { page-break-after: always; padding-top: 3cm; }
+.cover .brand { font-size: 13pt; font-weight: bold; color: #2b6cb0; letter-spacing: 2px; }
+.cover-meta { margin-top: 1cm; border-collapse: collapse; }
+.cover-meta th { text-align: left; padding: 4px 16px 4px 0; color: #555; font-weight: 600; }
+.cover-meta td { padding: 4px 0; }
+
+/* Executive summary */
+.exec-summary p { text-align: justify; }
+
+/* Severity overview table */
+.severity-table { width: 100%; border-collapse: collapse; margin-top: 0.3cm; text-align: center; }
+.severity-table th, .severity-table td { border: 1px solid #ccc; padding: 6px; font-weight: bold; }
+.severity-table thead th { background: #f2f2f2; }
+.severity-table .total { background: #f8f8f8; }
+
+/* Severity color-coding */
+.sev-critical { color: #7b1113; }
+.sev-high     { color: #c0392b; }
+.sev-medium   { color: #d68910; }
+.sev-low      { color: #2471a3; }
+.sev-info     { color: #566573; }
+
+/* Per-vuln */
+.vuln { page-break-inside: avoid; margin: 0.4cm 0; padding: 0.25cm 0.35cm; border-left: 4px solid #ccc; }
+.sev-border-critical { border-left-color: #7b1113; }
+.sev-border-high     { border-left-color: #c0392b; }
+.sev-border-medium   { border-left-color: #d68910; }
+.sev-border-low      { border-left-color: #2471a3; }
+.sev-border-info     { border-left-color: #566573; }
+
+.vuln-meta { border-collapse: collapse; margin: 0.15cm 0; font-size: 9pt; }
+.vuln-meta th { text-align: left; padding: 2px 8px 2px 0; color: #666; font-weight: 600; }
+.vuln-meta td { padding: 2px 18px 2px 0; }
+
+.vuln-fix { background: #f0f7ff; padding: 0.2cm 0.3cm; border-radius: 3px; }
+.vuln-evidence pre {
+  background: #f6f6f6; border: 1px solid #e0e0e0; padding: 4px 6px;
+  font-size: 8pt; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere;
+}
+.evidence-item { margin: 0.15cm 0; }
+.evidence-item .tool { font-weight: bold; color: #2b6cb0; }
+.evidence-item .loc { color: #555; margin-left: 8px; font-size: 9pt; }
+
+/* Mobile */
+.mobile { page-break-before: always; }
