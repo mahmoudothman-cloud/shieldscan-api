@@ -9,6 +9,26 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-07-26 — M10.B Sub-Milestone CLOSED (second M10 sub-milestone; Report Generation + Delivery) — Cumulative Drift Count Preserved at 66
+
+M10.B (Report Generation + Delivery; Tasks 10.2/10.3/10.4; ADR-034) closed its entire lifecycle with **zero catalogue increments** — the second M10 sub-milestone. This is a closure note, **not** a drift entry — Drift #66 (M9.A C1) remains the latest catalogued drift. Docs closure at `397df21`; ADR-034 canonical at SPEC §13 `f099a5c`.
+
+**M10.B chain (all outcomes γ; 5 code + 2 docs micro-commits):** Stage 1 design `92fe1c7` (Mode-1 full; 5 gates / 17 locks) + C0 ADR-034 `f099a5c` + C1 `ac91e62` (reports table + Report/ReportFormat + RLS migration parent `ecfed70e05e4` + TENANT_TABLES registration + jsonschema 4.26.0 + bundled SARIF 2.1.0 schema) + C1-docs `67f0676` (jsonschema VERSIONS.md) + C2 `c383b06` (ReportContext seam + JSON + SARIF generators) + C3 `9b2724e` (WeasyPrint PDF service + pydyf constraint fix) + C3-docs `a50898f` (pydyf VERSIONS.md) + C4 `0d7e5e5` (5 SPEC §6 endpoints) + P5.A-1 `397df21` (docs) + this api entry + the engine cross-ref forthcoming.
+
+**Delivered:** the report pipeline reachable end-to-end (scan → M9 analysis → ReportContext seam → PDF/JSON/SARIF/executive → customer download); reports table + RLS (Gotcha 3); 5 SPEC §6 scan-scoped endpoints; SARIF **2.1.0** jsonschema-conformance-validated; PDF via WeasyPrint lazy-generate → R2 → reports-row (idempotent, generate-or-reuse).
+
+**Mitigations that prevented Drift #67:** V-AA LARGE-classification + decomposition scoped M10.B as a bounded sub-milestone (not the whole milestone); Mode-1 5-gate brainstorming pre-resolved the ~17 locks incl. the two escalation-class items (jsonschema dependency + base-`/report` scope-delta) BEFORE implementation; the V-JJ pre-C cascade caught the **10th averted-prediction** (RLS reaches the test DB via `TENANT_TABLES` + `create_all`, NOT via migrations — without registering `reports` the cross-tenant test would have false-passed) + the **11th** (scan target lives on `Project`, not `Scan`); the pydyf blocker diagnosed to root cause (WeasyPrint 62.3's under-ceilinged `pydyf>=0.10.0` metadata → poetry pulled the API-breaking 0.12.1; latent since before M9 as no render path had exercised it) + fixed via a metadata-grounded pin `>=0.10.0,<0.11`, escalated per Rule 4 not worked around; V-JJH resolved empirically as **not-needed** (report endpoints are all GETs; this codebase audits state changes, not reads). Both dependency escalations VERSIONS.md-locked in-session.
+
+**Two pre-existing auth-route infra-flakes surfaced under load** (rate-limiter IP-counter at C1; `/ready` dep-timeout at C3) — each classified via isolation re-run + orthogonality argument, note-and-proceeded. These are **NOT test-gate-within-lock** (that class is source-under-implementation; C1-C4 source/tests were clean and green) — they are harness timing/isolation fragility. Prioritized forward-pin for a hardening pass so the suite regains a trustworthy clean-green baseline.
+
+**Lineages:** 11-instance averted-prediction lineage (10th TENANT_TABLES dual-mechanism + 11th target-on-Project this sub-milestone); 3-instance test-gate-within-lock pattern NOT incremented at M10.B.
+
+**Forward-pins carried:** auth-route infra-probe test-isolation hardening (2 flakes, prioritized) · full-OASIS SARIF 2.1.0 schema swap → hardening · eager-PDF + unique-constraint `(scan_id, format)` + per-download-deadline expiry → production-readiness · white-label branding → Enterprise · report-endpoint tier-gating → billing · SARIF `application/sarif+json` content-type → if a consumer requires it · SARIF → GitHub Code Scanning upload → Task 12.
+
+⇒ Next per DQ5: ***"Begin M10.C — Compliance Mapping"*** (Task 10.5; 2-table migration + SOC2/ISO-27001 seed; compressed shape per DQ4).
+
+---
+
 ### 2026-07-06 — M10.A Sub-Milestone CLOSED (first M10 sub-milestone) — Cumulative Drift Count Preserved at 66
 
 M10.A (Vulnerability Endpoints; Task 10.1) closed its entire lifecycle with **zero catalogue increments** — the first M10 sub-milestone, and the **first C0-less sub-milestone** in the arc (no ADR per DQ2 decomposition lock + no SPEC edit + no migration; VulnerabilityStatus + VulnerabilityHistory tables pre-existed scaffolded-unwired). This is a closure note, **not** a drift entry — Drift #66 (M9.A C1) remains the latest catalogued drift. Docs closure at `a4cca91`; lock-record at `df68e69`.
