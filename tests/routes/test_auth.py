@@ -16,7 +16,6 @@ import pytest
 from jose import jwt as jose_jwt
 from sqlalchemy import select
 
-from app.config import settings
 from app.models.audit import AuditLog
 from app.models.identity import Membership, Organization, User
 from app.services.auth import (
@@ -436,7 +435,22 @@ async def test_me_rejects_revoked_access_token(
 
 
 @pytest.mark.asyncio
-async def test_ready_returns_200_when_deps_healthy(client):
+async def test_ready_returns_200_when_deps_healthy(client, monkeypatch):
+    # Pin both dep-checks healthy so the test proves the readiness-aggregation
+    # -returns-200 logic deterministically (its actual point), rather than
+    # gating on real postgres/redis round-trips finishing inside the 0.5s
+    # _PROBE_TIMEOUT — which flakes under full-suite CPU load. Mirrors the
+    # sibling test_ready_returns_503_when_redis_unreachable monkeypatch shape.
+    import app.main as main_module
+
+    async def _ok_postgres_check():
+        return "ok"
+
+    async def _ok_redis_check(_redis):
+        return "ok"
+
+    monkeypatch.setattr(main_module, "_check_postgres", _ok_postgres_check)
+    monkeypatch.setattr(main_module, "_check_redis", _ok_redis_check)
     r = await client.get("/ready")
     assert r.status_code == 200
     body = r.json()

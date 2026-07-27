@@ -9,6 +9,20 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-07-27 — Auth-Route Infra-Flake Hardening: /ready determinism FIXED + rate-limiter flake analysis CORRECTED — Cumulative Drift Count Preserved at 66
+
+Resolves the prioritized auth-route test-isolation hardening forward-pin carried through M10.B. Not a drift entry — a test-determinism fix + a **correction of a previously-recorded root cause** (the 12th averted-prediction class: correcting a committed belief).
+
+**Flake 2 (`test_ready_returns_200_when_deps_healthy`) — FIXED.** Mechanism confirmed at probe: `_PROBE_TIMEOUT = 0.5` (a module constant at `main.py:46`) wraps the real postgres/redis round-trips in `asyncio.wait_for`; under ~350s full-suite CPU contention a real dep round-trip exceeds 500ms → `timeout_500ms` → 503 → the 200-assert flaked (surfaced at M10.B C3 `9b2724e`). Fix (test-only, C-B): monkeypatch both `_check_postgres` + `_check_redis` to healthy in this test — mirroring the sibling `test_ready_returns_503_when_redis_unreachable`, which already monkeypatches `_check_redis` — so the test deterministically proves the readiness-aggregation-returns-200 logic (its actual point) without gating on real-infra latency (an ops concern, not this unit's). Assertion preserved (still 200 + `{"postgres":"ok","redis":"ok"}`). No prod-surface change. Also removed a pre-existing unused `from app.config import settings` import (F401) in the same file to keep it ruff-clean (incidental in-file hygiene).
+
+**Flake 1 (`test_login_rate_limited_by_ip_after_5_attempts`) — ANALYSIS CORRECTED, NOT fixed (12th averted-prediction).** The C1-recorded root cause ("Redis IP-attempt-counter state not reset between tests"; surfaced at M10.B C1 `ac91e62`) is **REFUTED by the fixtures**: `fake_redis` is fresh-per-test with `flushall()` teardown (conftest:149-160), `client` overrides `get_redis` to that same fresh instance (conftest:251-252) → no cross-test leakage possible; the test uses a unique IP (`198.51.100.77`); fakeredis is in-memory (no latency); the `login_ip` window is 900s so a sub-second straddle is ~0.1%. Static analysis says the test should be deterministic. A **reproduction pass — 6 isolation runs + 3 full-suite runs (810 passed each, 0 failures) — did NOT surface the failure.** Per the no-blind-fix guardrail, NO speculative code fix was applied (a `time.time` clock-pin would mask, not resolve, an unconfirmed mechanism). Grounded residual hypotheses for monitoring: a load-induced dropped/slow request within the 5-attempt loop (fewer than 5 increments land → 6th allowed), or the ~0.1% window-boundary straddle.
+
+**Forward-pin narrowed:** the auth-route infra-probe hardening pin is now closed for /ready (fixed) and reclassified for the rate-limiter as *"unreproduced under 9 exposures; C1 cause refuted; monitor — reopen only if it recurs with captured evidence."*
+
+Cumulative session-tail framing-drift count: **66** preserved (Drift #66 remains latest catalogued drift). 12-instance averted-prediction lineage (the refuted C1 cause is the 12th — a correction to a previously-committed belief). Cross-references: shieldscan-api `9b2724e` (/ready flake) + `ac91e62` (rate-limiter flake) + the two M10.B DRIFT-LOG closure entries that carried the prioritized pin.
+
+---
+
 ### 2026-07-26 — M10.B Sub-Milestone CLOSED (second M10 sub-milestone; Report Generation + Delivery) — Cumulative Drift Count Preserved at 66
 
 M10.B (Report Generation + Delivery; Tasks 10.2/10.3/10.4; ADR-034) closed its entire lifecycle with **zero catalogue increments** — the second M10 sub-milestone. This is a closure note, **not** a drift entry — Drift #66 (M9.A C1) remains the latest catalogued drift. Docs closure at `397df21`; ADR-034 canonical at SPEC §13 `f099a5c`.
