@@ -9,6 +9,33 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-07-31 — M10.C Sub-Milestone CLOSED (third M10 sub-milestone; Compliance Mapping) — Cumulative Drift Count Preserved at 66
+
+Closure entry for the third M10 sub-milestone (Task 10.5; SPEC §DB + §6 + §9). **Not a drift entry — no Drift #67**: M10.C landed **0 catalogued drifts**. Structural precedent: the M10.B closure entry `6b75278` (a closure summary, not a catalogue increment).
+
+**Chain — all γ, no C0.** Stage 1 lock-record `bee52c6` (light Mode-2, 2 gates / ~9 locks) + C1 `edea03a` + C2 `40b8243` + P5.A docs annotations `10b4502` + this api DRIFT-LOG closure + engine cross-ref forthcoming. **No C0 / no ADR** — data-model + seed over existing patterns (like M10.A; ADR-034 was reserved for M10.B). But unlike M10.A this **carried a migration** (schema + a first-of-kind seed/data migration `a7c3e9f04b21`), so *C0-less ≠ migration-less* here.
+
+**Delivered.** Compliance mapping end-to-end (scan findings → `Vulnerability.cwe_id` → control → three-state posture; per-scan × framework primitive + org-wide worst-state aggregate). 3 **GLOBAL** reference tables (`compliance_frameworks` → `compliance_controls` → `cwe_control_mappings`). SOC2 (CC-series) + ISO 27001:2013 Annex A seed. 3 org-scoped GET endpoints (frameworks list · per-scan posture · org posture). Suite **828, ZERO regressions**.
+
+**Mitigations (why 0 catalogued drifts):**
+- **Entry-probe grounding before design** resolved two would-be drifts empirically: the **3-vs-2-table scope-delta** (decomposition/plan-literal omit `compliance_controls`) → resolved in **SPEC-canon's favor** (lines 331-333; echoes M10.A 7-vs-4 + M10.B 5-vs-4); and the **GLOBAL-vs-tenant determination** → SPEC **line 345's explicit enumeration** of these 3 tables as non-tenant-scoped (grounded, not inferred).
+- **Test-enforced global-data decision:** the **not-in-TENANT_TABLES ∅ assertion** (`{frameworks,controls,mappings} ∩ TENANT_TABLES == ∅`) makes the global-reference-data call a test invariant — the deliberate **mirror-image inverse of M10.B Catch-1** (where `reports` had to be *added* to TENANT_TABLES or its cross-tenant test would false-pass; here the tables must be *kept out* or the global-data decision is undefended).
+- **create_all-vs-migration seed-split** surfaced + resolved: the test harness builds schema via `create_all`, not migrations, so the migration's `op.bulk_insert` seed is absent in tests → added a runtime `seed_compliance_data()` helper in `services/compliance/frameworks.py`. Same harness-gap class as M10.B Catch-1 (there on RLS reaching the test DB; here on seed data) — an **averted-prediction-class grounding refinement**.
+- **Three-state posture honesty:** `NOT_ASSESSED` verified genuine against SOC2 **CC7.2 / CC8.1** (controls with no CWE mapping) — the artifact never overclaims a control as `pass` when it simply can't assess it.
+- **`op.bulk_insert` first-of-kind** (no seed-migration precedent in the repo) landed clean with an **inline-literal seed** (UUIDs generated at upgrade-time, threaded through FKs) rather than importing app code into the migration — migration import-stability across schema evolution.
+
+**Lineage / counters.** 12-instance averted-prediction lineage (the seed-split refinement is in-class). The 3-instance **test-gate-within-lock** pattern is **NOT incremented**: the C1 + C2 test-authoring iterations were malformed-query fixes (an explicit `.select_from()` disambiguation) — *test source touched, product source untouched* — normal authoring workflow, not the class. **Drift #66** (M9.A C1 ORM-vs-DB) remains the latest catalogue entry. Cumulative session-tail framing-drift count: **66**.
+
+**Infra-flake status.** BOTH auth-route infra flakes (rate-limiter IP-counter + `/ready` dep-timeout) were **ABSENT** across the C1 (818) and C2 (828) full-suite runs — the preceding hardening pass (`c128e60`: Flake-2 monkeypatch fix + Flake-1 corrected-record) is holding; the clean-green baseline is restored.
+
+**Forward-pins carried out of M10.C.** tier-gating → billing (**3rd instance**: /fix + report-endpoints + compliance); PCI framework seed → Enterprise tier; exhaustive control/CWE coverage → post-launch expansion; ISO 27001:2022 renumber → future migration; $49 compliance-PDF add-on → M10.B report territory.
+
+**⇒ Next per DQ5:** *"Begin M10.D — Tool Health"* (Task 10.6; minimal shape per DQ4 — the **final** M10 sub-milestone; closes M10 entirely).
+
+Cross-references: shieldscan-docs `10b4502` + `bee52c6` + `41ad3e6`; shieldscan-api `40b8243` + `edea03a` + `6b75278` (M10.B P5.A precedent); shieldscan-engine `7941df6` (Commit 3 target); SPEC §DB + §6 + §9 + line 345.
+
+---
+
 ### 2026-07-27 — Auth-Route Infra-Flake Hardening: /ready determinism FIXED + rate-limiter flake analysis CORRECTED — Cumulative Drift Count Preserved at 66
 
 Resolves the prioritized auth-route test-isolation hardening forward-pin carried through M10.B. Not a drift entry — a test-determinism fix + a **correction of a previously-recorded root cause** (the 12th averted-prediction class: correcting a committed belief).
