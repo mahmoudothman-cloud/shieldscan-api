@@ -31,6 +31,7 @@ from app.db import AsyncSessionLocal
 from app.redis_client import close_redis, get_redis, init_redis
 from app.routes import api_keys as api_keys_routes
 from app.routes import auth as auth_routes
+from app.routes import compliance as compliance_routes
 from app.routes import mobile as mobile_routes
 from app.routes import projects as projects_routes
 from app.routes import reports as reports_routes
@@ -151,3 +152,5 @@ app.include_router(scans_routes.scan_router, prefix="/v1")
 app.include_router(vulnerabilities_routes.router, prefix="/v1")
 app.include_router(vulnerabilities_routes.scan_vulns_router, prefix="/v1")
 app.include_router(reports_routes.router, prefix="/v1")
+app.include_router(compliance_routes.router, prefix="/v1")
+app.include_router(compliance_routes.scan_compliance_router, prefix="/v1")
