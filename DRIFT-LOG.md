@@ -9,6 +9,28 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-07-31 — M10.D Sub-Milestone CLOSED + M10 REPORT ARCHITECTURE MILESTONE ENTIRELY CLOSED (4 of 4) — Cumulative Drift Count Preserved at 66
+
+Closure entry for the fourth + final M10 sub-milestone (Task 10.6) **and** the milestone-level M10 closure. **Not a drift entry — no Drift #67**: M10.D landed **0 catalogued drifts**, and M10 as a whole landed 0 across all four sub-milestones. Structural precedent: the M10.C closure entry `08aa94a` (a closure summary, not a catalogue increment).
+
+**M10.D chain — all γ, no C0 / no migration / no ADR** (Redis-read-only over an existing signal — the leanest sub-milestone shape in the arc). Stage 1 lock-record `74f0688` (Mode-2 compressed; Gate-1 / 5 locks) + C1 `3d94c42` (the single implementation commit) + P5.A docs annotations `93c16e9` + this api DRIFT-LOG closure + engine cross-ref forthcoming.
+
+**M10.D delivered.** `GET /orgs/{org_id}/tools/health` — **two-state per-tool availability** (`available` if ≥1 live worker advertises the tool via the heartbeat `engines` list, else `unavailable`; **NO fabricated "degraded"** — the heartbeat carries liveness + engines-list, not per-tool health; the direct echo of M10.C's `not_assessed` honesty) derived from the **existing** engine heartbeat fleet signal (`shieldscan:workers:*` via the first `scan_iter` in the api — no engine change, no signal written). Liveness = SETEX-TTL presence; org-scoped/membership-gated but GLOBAL fleet data (the M10.C global-behind-org-path shape); distinct from `/ready` (API-pod infra vs worker-fleet). Suite **834 passed / 1 skipped** (intentional drain forward-pin) / 0 failed.
+
+**M10.D mitigations (why 0 catalogued drifts):** the entry-probe confirmed minimality (the health signal EXISTS — no engine change) and surfaced the signal-shape-vs-plan-literal-three-state finding **before** design; **V-MMD** grounded drain-status as **NOT a live signal** (the `HSET worker:$id status "draining"` is ops-runbook-only, not written by worker code — availability derived from heartbeat presence only, drain-awareness forward-pinned, the test **skipped-and-noted** rather than silently dropped); the **13th averted-prediction** — a cross-repo tool-name mismatch (engine `registry.Engines()` vs the api's `SCAN_TYPE_TOOLS` vocabulary) resolved by reusing `orchestrator.py`'s `SCAN_TYPE_TOOLS` as the single-source known-set, with normalization forward-pinned; two-state honesty held (no invented `degraded`).
+
+**Lineage / counters.** 13-instance averted-prediction lineage (the cross-repo tool-name grounding is the 13th). The 3-instance test-gate-within-lock pattern is **NOT incremented**. **Drift #66** (M9.A C1 ORM-vs-DB) remains the latest catalogue entry. Both auth-route infra flakes (rate-limiter IP-counter + `/ready` dep-timeout) were **ABSENT** across the C1 run — the hardening pass (`c128e60`) is holding through M10.D. Cumulative session-tail framing-drift count: **66**.
+
+**🏁 M10 REPORT ARCHITECTURE — ENTIRELY CLOSED (4 of 4).** All four sub-milestones CLOSED: **M10.A** vulnerability endpoints + **M10.B** report generation/delivery (ADR-034) + **M10.C** compliance mapping + **M10.D** tool health. M10 as a whole landed **0 catalogued drifts** (cumulative held at 66 across the entire milestone). The decomposition mini-chain **DQ1-DQ5** (`41ad3e6`) is complete/exhausted. M10 delivered the **customer-facing surface over the M9 pipeline**: vulnerability triage + downloadable PDF/JSON/SARIF reports + compliance posture + worker-fleet health.
+
+**M10-level forward-pins (consolidated).** tier-gating → billing (**4 instances**: /fix + report-endpoints + compliance + tools); eager-PDF + unique-constraint(scan_id,format) + per-download-expiry → production-readiness; white-label → Enterprise; full-OASIS SARIF 2.1.0 schema swap → hardening; auth-route infra-probe test-isolation (/ready resolved; rate-limiter unreproduced-monitored) → production-readiness; PCI framework seed → Enterprise; exhaustive compliance control/CWE coverage → post-launch; ISO 27001:2022 renumber → future migration; degraded tool-state → a real per-tool health signal; cross-repo tool-name normalization → follow-up; drain-status → fold-in-if-live.
+
+**⇒ M10 complete — no further M10 trigger.** The next milestone is the subsequent roadmap item (a fresh planning entry; NOT begun here).
+
+Cross-references: shieldscan-docs `93c16e9` + `74f0688` + `41ad3e6`; shieldscan-api `3d94c42` + `08aa94a` (M10.C P5.A precedent) + `orchestrator.py` (`SCAN_TYPE_TOOLS` known-set); shieldscan-engine `5fcc06a` (Commit 3 target) + `internal/worker/heartbeat.go` (signal source); SPEC §6 line 567 + §7 heartbeat contract.
+
+---
+
 ### 2026-07-31 — M10.C Sub-Milestone CLOSED (third M10 sub-milestone; Compliance Mapping) — Cumulative Drift Count Preserved at 66
 
 Closure entry for the third M10 sub-milestone (Task 10.5; SPEC §DB + §6 + §9). **Not a drift entry — no Drift #67**: M10.C landed **0 catalogued drifts**. Structural precedent: the M10.B closure entry `6b75278` (a closure summary, not a catalogue increment).
