@@ -36,6 +36,7 @@ from app.routes import mobile as mobile_routes
 from app.routes import projects as projects_routes
 from app.routes import reports as reports_routes
 from app.routes import scans as scans_routes
+from app.routes import tools as tools_routes
 from app.routes import vulnerabilities as vulnerabilities_routes
 from app.services.ai.clients import init_ai_clients, shutdown_ai_clients
 from app.services.ai_pipeline_consumer import AIPipelineConsumer
@@ -154,3 +155,4 @@ app.include_router(vulnerabilities_routes.scan_vulns_router, prefix="/v1")
 app.include_router(reports_routes.router, prefix="/v1")
 app.include_router(compliance_routes.router, prefix="/v1")
 app.include_router(compliance_routes.scan_compliance_router, prefix="/v1")
+app.include_router(tools_routes.router, prefix="/v1")
