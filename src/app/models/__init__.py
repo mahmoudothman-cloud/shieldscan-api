@@ -9,6 +9,7 @@ from app.models import (  # noqa: F401
     ai,
     audit,
     base,
+    compliance,
     identity,
     mobile,
     projects,
