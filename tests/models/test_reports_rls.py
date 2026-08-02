@@ -23,6 +23,28 @@ from app.models.reports import Report, ReportFormat
 from app.models.scans import Scan, ScanStatus, ScanType
 
 
+def test_report_format_persists_db_valid_lowercase_values():
+    """Regression (5th live-bring-up finding): the reports.format column MUST
+    persist the enum VALUE (lowercase "pdf"/"sarif"/"json"), matching the
+    report_format DB type created by migration f1a2b3c4d5e6 — NOT the member
+    NAME ("PDF").
+
+    SQLAlchemy's Enum defaults to the member NAME. Without values_callable the
+    stored-PDF path (generate_or_get_pdf_report) sends "PDF" to the lowercase
+    DB enum → asyncpg InvalidTextRepresentationError → report/pdf 500. JSON and
+    SARIF are rendered on-demand and never persisted, so they were unaffected.
+    The test harness builds schema via create_all (from this model), so the bug
+    was invisible to tests until it hit the migration-built prod enum.
+    """
+    enum_type = Report.__table__.c.format.type
+    assert enum_type.values_callable is not None, (
+        "reports.format must map enum→value (lowercase), not the default name"
+    )
+    assert enum_type.values_callable(ReportFormat) == ["pdf", "sarif", "json"]
+    # And the enum values themselves are the DB-valid lowercase labels.
+    assert [e.value for e in ReportFormat] == ["pdf", "sarif", "json"]
+
+
 @pytest.mark.asyncio
 async def test_reports_cross_tenant_read_blocked(db_session):
     """A report row under org A is invisible to org B, visible to org A."""

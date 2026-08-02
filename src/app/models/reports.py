@@ -47,7 +47,19 @@ class Report(Base, TimestampMixin, TenantMixin):
         index=True,
     )
     format: Mapped[ReportFormat] = mapped_column(
-        Enum(ReportFormat, name="report_format"), nullable=False
+        Enum(
+            ReportFormat,
+            name="report_format",
+            # Persist the enum VALUE ("pdf"/"sarif"/"json"), matching the
+            # report_format DB type created (lowercase) by migration
+            # f1a2b3c4d5e6. SQLAlchemy defaults to the member NAME ("PDF"),
+            # which the stored-PDF path then sends to a lowercase DB enum →
+            # asyncpg InvalidTextRepresentationError: invalid input value for
+            # enum report_format: "PDF". (JSON/SARIF are rendered on-demand
+            # and never persisted, so only the PDF write path was affected.)
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
+        nullable=False,
     )
     r2_key: Mapped[str] = mapped_column(String(500), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
