@@ -159,7 +159,7 @@ async def test_generate_executive_summary_budget_exceeded_fallback(
         operation_type="embedding",
         tokens_in=1,
         tokens_out=None,
-        cost_usd=Decimal("0.30"),  # exhausts FULL_WEB $0.25
+        cost_usd=Decimal("0.80"),  # exhausts FULL_WEB $0.75 (summary gates on full cap)
     )
     install_anthropic(monkeypatch, [make_anthropic_response(_SUMMARY_TEXT)])
     await add_vulnerability(db_session, scan, org, project)

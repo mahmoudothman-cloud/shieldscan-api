@@ -34,7 +34,11 @@ from app.models.raw_findings import EngineCategory, RawFinding
 from app.models.scans import Scan
 from app.models.vulnerabilities import Vulnerability
 from app.services.ai.clients import get_anthropic_client
-from app.services.ai.cost_tracking import check_budget, log_ai_call
+from app.services.ai.cost_tracking import (
+    RESERVED_SUMMARY_BUDGET_USD,
+    check_budget,
+    log_ai_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +250,9 @@ async def generate_fix(
         scan_id=scan.id,
         scan_type=scan.scan_type,
         estimated_cost_usd=ESTIMATED_FIX_COST_USD,
+        # Reserve the executive summary's slice so a high-finding-count scan's
+        # fix spend can't starve it (the summary runs last).
+        reserve_usd=RESERVED_SUMMARY_BUDGET_USD,
     )
     if not permitted:
         logger.info(

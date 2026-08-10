@@ -111,12 +111,14 @@ async def test_m9c_smoke_budget_exhaustion_graceful_degradation(
     install_openai(monkeypatch, FakeEmbeddings(vector_for=_distinct_vec))
     install_qdrant(monkeypatch)
     install_anthropic(monkeypatch, [make_anthropic_response(_FIX)] * 5)
-    # Exhaust the FULL_WEB budget ($0.25) up front.
+    # Exhaust the FULL_WEB budget ($0.75) up front — above both the fix
+    # ceiling (budget - summary reserve = 0.70) and the summary's full-cap
+    # gate, so fixes AND the summary degrade to their fallbacks.
     await log_ai_call(
         db=db_session, organization_id=org.id, scan_id=scan.id,
         provider="openai", model="text-embedding-3-small",
         operation_type="embedding", tokens_in=1, tokens_out=None,
-        cost_usd=Decimal("0.30"),
+        cost_usd=Decimal("0.80"),
     )
     await _seed_two_findings(db_session, scan, org)
 

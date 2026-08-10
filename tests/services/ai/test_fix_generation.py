@@ -211,7 +211,8 @@ async def test_generate_fix_success_logs_ai_call(db_session, monkeypatch):
 
 async def test_generate_fix_budget_exceeded_falls_back(db_session, monkeypatch):
     org, project, scan = await seed_org_project_scan(db_session)
-    # Pre-consume the whole FULL_WEB budget ($0.25) so the next call is refused.
+    # Pre-consume past the FULL_WEB fix ceiling (budget 0.75 - summary reserve
+    # 0.05 = 0.70) so the next fix call is refused.
     await log_ai_call(
         db=db_session,
         organization_id=org.id,
@@ -221,7 +222,7 @@ async def test_generate_fix_budget_exceeded_falls_back(db_session, monkeypatch):
         operation_type="embedding",
         tokens_in=1,
         tokens_out=None,
-        cost_usd=Decimal("0.30"),
+        cost_usd=Decimal("0.80"),
     )
     install_anthropic(monkeypatch, [make_anthropic_response(_FIX_TEXT)])
     vuln = await add_vulnerability(db_session, scan, org, project)

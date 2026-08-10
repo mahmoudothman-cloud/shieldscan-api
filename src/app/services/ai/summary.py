@@ -22,7 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.scans import Scan
 from app.models.vulnerabilities import Severity, Vulnerability
-from app.services.ai.cost_tracking import check_budget, log_ai_call
+from app.services.ai.cost_tracking import (
+    RESERVED_SUMMARY_BUDGET_USD,
+    check_budget,
+    log_ai_call,
+)
 from app.services.ai.fix_generation import (
     _call_claude_with_retry,
     _compute_cost_from_usage,
@@ -37,7 +41,9 @@ SUMMARY_OPERATION = "executive_summary"
 SUMMARY_MAX_TOKENS = 1500
 
 # Q11 A.a: conservative per-scan summary cost estimate for the budget gate.
-ESTIMATED_SUMMARY_COST_USD = Decimal("0.05")
+# Single source of truth: equals the slice fix-generation reserves, so the
+# reservation exactly covers one summary call (see cost_tracking).
+ESTIMATED_SUMMARY_COST_USD = RESERVED_SUMMARY_BUDGET_USD
 
 _ZERO_VULN_SUMMARY = (
     "## Executive Summary\n\n"
