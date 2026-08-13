@@ -171,6 +171,12 @@ class RawFindingCreate(BaseModel):
     additional_cwes: Optional[list[str]] = None
 
     # --- Metadata ---
+    # Engine wire key is `metadata` (RawFinding.Metadata, map[string]string);
+    # Python model column is `tool_metadata` (`metadata` is reserved on
+    # SQLAlchemy Declarative classes). Field(alias="metadata") bridges the
+    # two, mirroring the mobile_* alias pattern above. Opening this field is
+    # what lets nmap/zap/mobsf/trivy pass extra="forbid" ingest at all.
+    tool_metadata: Optional[dict[str, str]] = Field(default=None, alias="metadata")
     raw_output_ref: Optional[str] = None
     discovered_at: datetime
     fingerprint: str

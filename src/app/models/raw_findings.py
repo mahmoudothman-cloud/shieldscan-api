@@ -16,7 +16,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -134,6 +134,12 @@ class RawFinding(Base, TimestampMixin, TenantMixin):
     cert_subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # --- Metadata ---
+    # Per-tool structured key/value payload (engine RawFinding.Metadata,
+    # events.go `metadata,omitempty`). Named tool_metadata because
+    # `metadata` is reserved on SQLAlchemy Declarative classes; the ingest
+    # schema bridges the wire key via Field(alias="metadata"). Populated by
+    # nmap/zap/mobsf/trivy; NULL for tools that emit no structured metadata.
+    tool_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     raw_output_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

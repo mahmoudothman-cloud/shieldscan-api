@@ -82,6 +82,7 @@ from uuid import UUID, uuid4
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+from pydantic import ValidationError
 from sqlalchemy import func, insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -712,21 +713,43 @@ class CompletionsConsumer:
         (both derived from ScanJob in ``_persist``) and uses
         ``model_dump(by_alias=False)`` so SQLAlchemy column names land
         in the dict (``mobile_permission`` not the wire alias
-        ``permission``); inserting wire aliases would fail with
+        ``permission``; ``tool_metadata`` not the wire alias
+        ``metadata``); inserting wire aliases would fail with
         unknown-column errors.
+
+        **Per-finding fault isolation.** Each finding is validated
+        independently; a ``ValidationError`` on one finding is logged and
+        skipped rather than propagated. Previously a single malformed
+        finding aborted the whole engine's batch at insert time (one bad
+        zap event discarded all 608 findings). Rejected counts are logged
+        after the loop.
 
         Empty input returns ``[]`` so caller's status-only path remains
         cheap.
         """
         if not raw_findings:
             return []
+        total = len(raw_findings)
         dicts: list[dict] = []
+        rejected = 0
+        reject_tools: set[str] = set()
         for raw in raw_findings:
-            validated = RawFindingCreate.model_validate(raw)
+            try:
+                validated = RawFindingCreate.model_validate(raw)
+            except ValidationError as exc:
+                # Isolate the bad finding; keep the rest of the batch.
+                rejected += 1
+                if isinstance(raw, dict):
+                    reject_tools.add(str(raw.get("tool_name", "unknown")))
+                logger.debug(
+                    "raw finding rejected by RawFindingCreate validation: %s",
+                    exc,
+                )
+                continue
             # by_alias=False → Python field names (mobile_permission,
-            # mobile_component_name); by_alias=True would emit wire
-            # aliases (permission, component_name) which RawFinding
-            # has no columns for.
+            # mobile_component_name, tool_metadata); by_alias=True would
+            # emit wire aliases (permission, component_name, metadata)
+            # which RawFinding has no columns for.
             d = validated.model_dump(by_alias=False)
             # Drop scan_id and org_id from the per-finding payload;
             # the authoritative scope comes from ScanJob (Phase-0
@@ -735,6 +758,13 @@ class CompletionsConsumer:
             d.pop("scan_id", None)
             d.pop("org_id", None)
             dicts.append(d)
+        if rejected:
+            logger.warning(
+                "raw findings rejected during ingest: %d of %d (tool=%s)",
+                rejected,
+                total,
+                ",".join(sorted(reject_tools)) or "unknown",
+            )
         return dicts
 
     # ---------------------------------------------------------------- aggregate
