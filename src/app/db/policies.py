@@ -75,17 +75,48 @@ CREDENTIAL_INDEXED_TABLES: Final[dict[str, str]] = {
 }
 
 
+# The tenant predicate, shared by USING and WITH CHECK.
+#
+# Three deliberate parts, each empirically justified — see the RLS entry in
+# DRIFT-LOG.md for the probe output:
+#
+#   current_setting(..., true)  two-argument form. The one-argument form RAISES
+#                               `unrecognized configuration parameter` when the
+#                               GUC was never set, turning a missed tenant
+#                               context into a hard 500 instead of a safe empty
+#                               result.
+#   NULLIF(..., '')             REQUIRED, not belt-and-braces. Once the GUC has
+#                               been touched in a session, clearing it (RESET,
+#                               or a SET LOCAL reverting at commit) leaves an
+#                               EMPTY STRING, not NULL — and ''::uuid raises
+#                               `invalid input syntax for type uuid`. Without
+#                               NULLIF the two-argument form still 500s in
+#                               exactly the states a connection-reset handler
+#                               and a mid-request commit produce.
+#   ::uuid                      organization_id is uuid; NULL propagates, so a
+#                               missing GUC makes the predicate NULL → zero
+#                               rows. A missed tenant context can never mean
+#                               "all rows".
+TENANT_PREDICATE = (
+    "organization_id = NULLIF(current_setting('app.current_org_id', true), '')::uuid"
+)
+
+
 def rls_upgrade_sql() -> Iterable[str]:
     """Yield the DDL statements that enable RLS + install the policy."""
     for table in TENANT_TABLES:
         yield f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;"
         # FORCE makes the policy apply to the table owner too; without this
         # the Postgres role that owns the table silently bypasses RLS.
+        #
+        # NOTE: FORCE does NOT constrain a SUPERUSER or a BYPASSRLS role. The
+        # application must connect as a role holding neither — see
+        # APP_ROLE_NAME below.
         yield f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;"
         yield (
             f"CREATE POLICY tenant_isolation ON {table} "
-            f"USING (organization_id = current_setting('app.current_org_id')::uuid) "
-            f"WITH CHECK (organization_id = current_setting('app.current_org_id')::uuid);"
+            f"USING ({TENANT_PREDICATE}) "
+            f"WITH CHECK ({TENANT_PREDICATE});"
         )
 
 
@@ -129,10 +160,22 @@ def audit_triggers_downgrade_sql() -> Iterable[str]:
     yield "DROP FUNCTION IF EXISTS prevent_audit_log_mutation();"
 
 
-# Non-superuser role that the application (and tests via SET ROLE) use
-# for all runtime queries. Superusers bypass RLS *unconditionally*, so the
-# owner role (`shieldscan`) cannot be what serves requests. This role is
-# created idempotently so the migration is rerunnable.
+# Non-superuser role that the application uses for all runtime queries.
+# Superusers bypass RLS *unconditionally*, so the owner role (`shieldscan`)
+# cannot be what serves requests. Created idempotently so the migration is
+# rerunnable.
+#
+# HISTORY — this role was provisioned by dbdccfd, whose commit message states
+# "The app connects / tests SET ROLE to this". Only the tests half shipped: no
+# SET ROLE, and no connection as this role, ever existed in src/. The app has
+# been serving every request as the superuser owner, so the policies above were
+# never evaluated in production while the suite — which does SET ROLE in its
+# fixture — reported tenant isolation as verified.
+#
+# The remediation connects the app AS this role (rather than SET ROLE from a
+# superuser connection, which leaves pooled connections superuser and fails
+# open for any call site that forgets to opt in). That requires LOGIN, granted
+# by the migration; the password is set out-of-band so no secret enters git.
 APP_ROLE_NAME = "shieldscan_app"
 
 
