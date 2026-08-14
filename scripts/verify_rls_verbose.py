@@ -11,10 +11,8 @@ import logging
 import os
 from uuid import uuid4
 
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql+asyncpg://shieldscan:shieldscan@localhost:5432/shieldscan_test",
-)
+# DATABASE_URL is derived from the app's configured URL (see below) so this
+# tracked file holds no credential; the password lives only in .env.
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 for k in (
@@ -24,8 +22,25 @@ for k in (
 ):
     os.environ.setdefault(k, "x")
 
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy.engine import make_url  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
+
+from app.config import settings  # noqa: E402
+
+TEST_DB_NAME = "shieldscan_test"
+
+# Derive the target from the app's configured DATABASE_URL and force the
+# database name to shieldscan_test: no credential in this tracked file, and no
+# way to point this destructive script (it drop_all's) at the dev database.
+# render_as_string(hide_password=False) — plain str(URL) masks the password.
+TEST_DATABASE_URL = (
+    make_url(settings.DATABASE_URL)
+    .set(database=TEST_DB_NAME)
+    .render_as_string(hide_password=False)
+)
+settings.DATABASE_URL = TEST_DATABASE_URL
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
 from app.db.policies import (
     APP_ROLE_NAME,
@@ -44,7 +59,7 @@ async def main() -> None:
     # schema-setup noise and turn it on just for the tenant-switch dance.
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    engine_silent = create_async_engine(os.environ["DATABASE_URL"], echo=False)
+    engine_silent = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with engine_silent.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
@@ -57,7 +72,7 @@ async def main() -> None:
     await engine_silent.dispose()
 
     # Now the verbose session — this is what the test effectively runs.
-    engine = create_async_engine(os.environ["DATABASE_URL"], echo=True)
+    engine = create_async_engine(TEST_DATABASE_URL, echo=True)
     connection = await engine.connect()
 
     print("\n─── 0. SET ROLE to non-superuser app role ───────────────────")

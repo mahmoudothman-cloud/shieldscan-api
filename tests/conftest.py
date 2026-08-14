@@ -47,10 +47,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 # Point Settings at the isolated test database BEFORE app.config is imported
 # via any model module. Keep other required env vars set so Settings() does
 # not raise on unrelated fields when collection imports app.models.
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql+asyncpg://shieldscan:shieldscan@localhost:5432/shieldscan_test",
-)
+#
+# DATABASE_URL is NOT set here — it is derived from the app's own configured
+# URL below, so this tracked file holds no credential. See _test_database_url.
+#
+# REDIS_URL is a stub: every test uses fakeredis, so this must NOT carry the
+# real password and nothing should connect with it.
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-anthropic")
@@ -72,7 +74,38 @@ os.environ.setdefault(
     "c2hpZWxkc2Nhbi10ZXN0LWZlcm5ldC1rZXktMzJieSE=",
 )
 
-TEST_DATABASE_URL = os.environ["DATABASE_URL"]
+TEST_DB_NAME = "shieldscan_test"
+
+
+def _test_database_url() -> str:
+    """Derive the test-database URL from the app's configured DATABASE_URL.
+
+    No credential is hardcoded in this tracked file: the password lives only in
+    .env (gitignored), so rotating the Postgres password requires no change
+    here. The database name is always replaced with ``shieldscan_test``, which
+    also makes it impossible for an exported DATABASE_URL to point a test run at
+    the development database.
+
+    Imported here rather than at module top so the stub env vars above are in
+    place before Settings() validates.
+    """
+    from sqlalchemy.engine import make_url
+
+    from app.config import settings
+
+    url = make_url(settings.DATABASE_URL).set(database=TEST_DB_NAME)
+    # render_as_string(hide_password=False) — plain str(URL) masks the password
+    # as "***", which would produce an unusable URL.
+    resolved = url.render_as_string(hide_password=False)
+
+    # app.db builds its engine from settings.DATABASE_URL at import time, so the
+    # singleton and the environment must agree before any model module loads.
+    settings.DATABASE_URL = resolved
+    os.environ["DATABASE_URL"] = resolved
+    return resolved
+
+
+TEST_DATABASE_URL = _test_database_url()
 
 
 @pytest_asyncio.fixture

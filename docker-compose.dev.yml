@@ -1,9 +1,14 @@
 services:
   postgres:
+    restart: unless-stopped
     image: postgres:18.3
     environment:
       POSTGRES_USER: shieldscan
-      POSTGRES_PASSWORD: shieldscan
+      # Sourced from .env (gitignored) — never a literal in this tracked file.
+      # NOTE: this only applies at FIRST init of the pgdata volume. On an
+      # already-initialised volume the live password is whatever ALTER USER last
+      # set; this value must be kept in sync so a future re-init matches .env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set — see .env}
       POSTGRES_DB: shieldscan
     ports:
       - "127.0.0.1:5432:5432"
@@ -15,11 +20,23 @@ services:
       - pgdata:/var/lib/postgresql
 
   redis:
+    restart: unless-stopped
     image: redis:8.6.2
+    # requirepass as defence in depth: the port is already bound to loopback,
+    # but ShieldScan's own scanner flagged the unauthenticated instance as a
+    # HIGH true positive. The :? form fails the command loudly rather than
+    # silently starting an unauthenticated Redis if .env is missing the value.
+    #
+    # This service has no volume, so `compose up -d redis` DISCARDS all keys
+    # (progress streams, worker heartbeats). To change the password on a live
+    # instance without that loss, use `redis-cli CONFIG SET requirepass`; this
+    # line is what makes it survive the next container recreate.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD not set — see .env}"]
     ports:
       - "127.0.0.1:6379:6379"
 
   qdrant:
+    restart: unless-stopped
     image: qdrant/qdrant:v1.11.5
     ports:
       - "127.0.0.1:6333:6333"
