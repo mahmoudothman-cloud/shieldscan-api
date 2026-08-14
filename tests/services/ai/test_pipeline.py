@@ -293,6 +293,42 @@ async def test_score_vulnerabilities_corroboration_caps_at_ten(db_session):
     assert vuln.severity == Severity.CRITICAL
 
 
+async def test_score_vulnerabilities_critical_assertion_survives_null_cvss(
+    db_session,
+):
+    """A tool-asserted CRITICAL with no CVSS must stay CRITICAL after scoring.
+
+    Regression: scanners assert risk qualitatively and almost never emit CVSS, so
+    the flat _DEFAULT_BASE_CVSS overwrote every asserted severity with MEDIUM —
+    sslyze CRITICAL, ZAP HIGH and ~24 INFO findings all scored 5.0.
+    """
+    org, project, scan = await seed_org_project_scan(db_session)
+    vuln = await _add_vuln(
+        db_session, scan, project, org, severity=Severity.CRITICAL, cvss_score=None
+    )
+    await _score_vulnerabilities(db=db_session, scan_id=scan.id)
+    assert vuln.severity_score == 9.0
+    assert vuln.severity == Severity.CRITICAL
+
+
+async def test_score_vulnerabilities_null_cvss_preserves_severity_spread(db_session):
+    """Distinct asserted severities must score distinctly, not all onto MEDIUM."""
+    org, project, scan = await seed_org_project_scan(db_session)
+    vulns = {
+        severity: await _add_vuln(
+            db_session, scan, project, org, severity=severity, cvss_score=None
+        )
+        for severity in Severity
+    }
+    await _score_vulnerabilities(db=db_session, scan_id=scan.id)
+    assert {s: v.severity for s, v in vulns.items()} == {s: s for s in Severity}
+    # …and the numeric scores are strictly ordered, so fix-gen's severity_score
+    # sort processes CRITICAL before INFO.
+    scores = [vulns[s].severity_score for s in Severity]
+    assert scores == sorted(scores, reverse=True)
+    assert len(set(scores)) == len(Severity)
+
+
 async def test_run_full_m9b_pipeline_embed_dedup_correlate_score(
     db_session, monkeypatch
 ):

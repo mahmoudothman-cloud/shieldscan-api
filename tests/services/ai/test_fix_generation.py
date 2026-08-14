@@ -309,3 +309,47 @@ async def test_generate_fixes_threshold_degraded_count(db_session, monkeypatch):
         )
     await _generate_fixes(db=db_session, scan_id=scan.id)
     assert scan.ai_pipeline_degraded is True
+
+
+# ------------------------------------------------- INFO exclusion (observations)
+
+
+async def test_generate_fixes_skips_info_severity(db_session, monkeypatch):
+    """INFO vulnerabilities get no Claude call and no fix text.
+
+    On a live scan ~24 of 39 findings are informational (tech banners,
+    robots.txt, SPA advisories). Spending a Sonnet call each starves the genuine
+    HIGH/CRITICAL findings under the per-scan budget cap.
+    """
+    org, project, scan = await seed_org_project_scan(db_session)
+    client = install_anthropic(monkeypatch, [make_anthropic_response(_FIX_TEXT)])
+    info = await add_vulnerability(
+        db_session, scan, org, project, severity=Severity.INFO, severity_score=1.0
+    )
+    high = await add_vulnerability(
+        db_session, scan, org, project, severity=Severity.HIGH, severity_score=7.0
+    )
+    await _generate_fixes(db=db_session, scan_id=scan.id)
+
+    assert len(client.messages.calls) == 1  # only the HIGH one
+    assert high.ai_fix_text == _FIX_TEXT
+    assert info.ai_fix_text is None
+
+
+async def test_generate_fixes_info_fix_text_stays_null_not_fallback_template(
+    db_session, monkeypatch
+):
+    """INFO must NOT get _fallback_fix_template.
+
+    That template claims "AI-generated remediation is temporarily unavailable",
+    which would be false: nothing failed and nothing was skipped for budget.
+    """
+    org, project, scan = await seed_org_project_scan(db_session)
+    install_anthropic(monkeypatch, [])
+    info = await add_vulnerability(
+        db_session, scan, org, project, severity=Severity.INFO, severity_score=1.0
+    )
+    await _generate_fixes(db=db_session, scan_id=scan.id)
+
+    assert info.ai_fix_text is None
+    assert scan.ai_pipeline_degraded is False  # an exclusion is not a degradation

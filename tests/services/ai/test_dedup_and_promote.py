@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 
+from app.config import settings
 from app.models.vulnerabilities import Vulnerability
 from app.services.ai.pipeline import (
     _collection_name,
@@ -19,6 +20,7 @@ from app.services.ai.pipeline import (
     _ensure_collection_exists,
     _merge_evidence,
 )
+from app.services.ai.promotion_denylist import denylisted_plugin_ids
 from tests.services.ai.conftest import (
     add_raw_finding,
     seed_org_project_scan,
@@ -254,3 +256,94 @@ async def test_cluster_representative_fields_populated(db_session, stub_qdrant):
     assert vuln.cwe_id == finding.cwe_id
     assert vuln.fingerprint == finding.fingerprint
     assert vuln.raw_finding_ids == [finding.id]
+
+
+# ------------------------------------------------- promotion denylist (config)
+
+
+async def test_denylisted_plugin_id_is_not_promoted(
+    db_session, stub_qdrant, monkeypatch
+):
+    """A denylisted plugin id yields no Vulnerability — but the raw finding stays.
+
+    ZAP 10109 "Modern Web Application" is an advisory that the target is a SPA,
+    not a finding: 74 raw findings on one live scan. It is filtered at PROMOTION
+    so raw_findings remains the complete 90-day audit record (SPEC §5.4).
+    """
+    monkeypatch.setattr(settings, "PROMOTION_DENYLIST_PLUGIN_IDS", "10109")
+    org, _project, scan = await seed_org_project_scan(db_session)
+    finding = await add_raw_finding(
+        db_session, scan, org, tool_metadata={"plugin_id": "10109"}
+    )
+    await _dedup_and_promote(
+        db=db_session,
+        scan=scan,
+        raw_findings=[finding],
+        embeddings={finding.id: _VEC_A},
+    )
+    await db_session.flush()
+
+    assert await _count_vulns(db_session, scan.id) == 0
+    # The audit record is untouched: still present, never marked promoted.
+    assert finding.vulnerability_id is None
+    assert finding.promoted_at is None
+
+
+async def test_non_denylisted_plugin_id_still_promotes(
+    db_session, stub_qdrant, monkeypatch
+):
+    monkeypatch.setattr(settings, "PROMOTION_DENYLIST_PLUGIN_IDS", "10109")
+    org, _project, scan = await seed_org_project_scan(db_session)
+    finding = await add_raw_finding(
+        db_session, scan, org, tool_metadata={"plugin_id": "10038"}
+    )
+    await _dedup_and_promote(
+        db=db_session,
+        scan=scan,
+        raw_findings=[finding],
+        embeddings={finding.id: _VEC_A},
+    )
+    await db_session.flush()
+    assert await _count_vulns(db_session, scan.id) == 1
+
+
+async def test_finding_without_plugin_id_metadata_still_promotes(
+    db_session, stub_qdrant, monkeypatch
+):
+    """Absence of the key is not a match — most tools emit no plugin_id at all."""
+    monkeypatch.setattr(settings, "PROMOTION_DENYLIST_PLUGIN_IDS", "10109")
+    org, _project, scan = await seed_org_project_scan(db_session)
+    finding = await add_raw_finding(db_session, scan, org, tool_metadata=None)
+    await _dedup_and_promote(
+        db=db_session,
+        scan=scan,
+        raw_findings=[finding],
+        embeddings={finding.id: _VEC_A},
+    )
+    await db_session.flush()
+    assert await _count_vulns(db_session, scan.id) == 1
+
+
+async def test_empty_denylist_config_disables_the_filter(
+    db_session, stub_qdrant, monkeypatch
+):
+    monkeypatch.setattr(settings, "PROMOTION_DENYLIST_PLUGIN_IDS", "")
+    org, _project, scan = await seed_org_project_scan(db_session)
+    finding = await add_raw_finding(
+        db_session, scan, org, tool_metadata={"plugin_id": "10109"}
+    )
+    await _dedup_and_promote(
+        db=db_session,
+        scan=scan,
+        raw_findings=[finding],
+        embeddings={finding.id: _VEC_A},
+    )
+    await db_session.flush()
+    assert await _count_vulns(db_session, scan.id) == 1
+
+
+def test_denylist_config_parses_comma_separated_list(monkeypatch):
+    monkeypatch.setattr(
+        settings, "PROMOTION_DENYLIST_PLUGIN_IDS", "10109, 10096 ,,90022"
+    )
+    assert denylisted_plugin_ids() == {"10109", "10096", "90022"}

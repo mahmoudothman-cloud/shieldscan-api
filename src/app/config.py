@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     # Content-Length pre-check) and again after read for clients that
     # don't send Content-Length. Task 3.3.
     MOBILE_UPLOAD_HARD_LIMIT_MB: int = 500
+    # Tool plugin ids (raw_findings.tool_metadata->>'plugin_id') that must never
+    # be promoted to a Vulnerability. Comma-separated; blank disables the filter.
+    #
+    # Config, not a code constant, because the list grows per target type — a
+    # SPA advisory that is noise for one target may be worth surfacing for
+    # another, and that call shouldn't need a release. Applied at PROMOTION
+    # only: raw_findings is the 90-day audit record (SPEC §5.4) and stays
+    # complete regardless of this setting.
+    #
+    # Default: ZAP 10109 "Modern Web Application" — an informational advisory
+    # that the target is a SPA, not a finding (74 raw findings on one live scan).
+    PROMOTION_DENYLIST_PLUGIN_IDS: str = "10109"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

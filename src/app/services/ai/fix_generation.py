@@ -30,7 +30,7 @@ import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.raw_findings import EngineCategory, RawFinding
+from app.models.raw_findings import EngineCategory, RawFinding, Severity
 from app.models.scans import Scan
 from app.models.vulnerabilities import Vulnerability
 from app.services.ai.clients import get_anthropic_client
@@ -329,6 +329,16 @@ async def _generate_fixes(*, db: AsyncSession, scan_id: UUID) -> None:
     processes the rest in descending ``severity_score`` order (Q6 C), and marks
     the scan degraded when the fallback rate crosses either Q8 B.b threshold.
     Defensive skip when the scan has no Vulnerabilities (Q13 C.b).
+
+    INFO-severity Vulnerabilities are excluded: they are observations (technology
+    banners, robots.txt, SPA advisories), not remediable defects, and on a real
+    scan they are the majority — spending a Sonnet call each both wastes budget
+    and pushes genuine HIGH/CRITICAL findings past the per-scan cap. Their
+    ``ai_fix_text`` stays NULL. It is deliberately NOT filled with
+    ``_fallback_fix_template``: that text claims "AI-generated remediation is
+    temporarily unavailable", which would be false here — nothing failed and
+    nothing was skipped for lack of budget. The report renderer, the JSON report,
+    and the /fix endpoint all handle a null fix.
     """
     scan = await db.get(Scan, scan_id)
     if scan is None:
@@ -346,7 +356,12 @@ async def _generate_fixes(*, db: AsyncSession, scan_id: UUID) -> None:
     if not vulnerabilities:
         return  # Q13 C.b defensive skip
 
-    pending = [v for v in vulnerabilities if v.ai_fix_text is None]  # Q7 A
+    pending = [
+        v
+        for v in vulnerabilities
+        if v.ai_fix_text is None  # Q7 A idempotency
+        and v.severity != Severity.INFO  # observations, not remediable defects
+    ]
     if not pending:
         return
     pending.sort(key=lambda v: v.severity_score or 0.0, reverse=True)  # Q6 C

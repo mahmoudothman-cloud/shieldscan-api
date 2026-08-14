@@ -12,6 +12,7 @@ import pytest
 from app.models.raw_findings import Severity
 from app.services.ai.scoring import (
     _map_score_to_severity_enum,
+    base_cvss_for,
     compute_corroboration_multiplier,
     compute_exploitability_multiplier,
     compute_severity_score,
@@ -92,4 +93,105 @@ def test_map_score_to_severity_enum_cvss_thresholds():
     assert _map_score_to_severity_enum(5.0) == Severity.MEDIUM
     assert _map_score_to_severity_enum(4.0) == Severity.MEDIUM
     assert _map_score_to_severity_enum(3.9) == Severity.LOW
-    assert _map_score_to_severity_enum(0.0) == Severity.LOW
+    assert _map_score_to_severity_enum(2.0) == Severity.LOW
+
+
+def test_map_score_to_severity_enum_info_is_reachable():
+    """INFO must be representable in scored output.
+
+    With the original 4/0 band floors, everything under 4.0 became LOW and no
+    score could ever map to INFO — which made INFO-based downstream filtering
+    (e.g. excluding observations from fix generation) impossible.
+    """
+    assert _map_score_to_severity_enum(1.9) == Severity.INFO
+    assert _map_score_to_severity_enum(1.0) == Severity.INFO
+    assert _map_score_to_severity_enum(0.0) == Severity.INFO
+
+
+# ---------------------------------------------------------------- base_cvss_for
+
+
+def test_base_cvss_for_prefers_real_cvss_over_asserted_severity():
+    # A tool that DID emit a CVSS vector wins over the severity-derived base.
+    assert base_cvss_for(9.8, Severity.LOW) == 9.8
+    assert base_cvss_for(0.0, Severity.CRITICAL) == 0.0  # 0.0 is a value, not null
+
+
+def test_base_cvss_for_derives_from_asserted_severity_when_cvss_null():
+    assert base_cvss_for(None, Severity.CRITICAL) == 9.0
+    assert base_cvss_for(None, Severity.HIGH) == 7.0
+    assert base_cvss_for(None, Severity.MEDIUM) == 5.0
+    assert base_cvss_for(None, Severity.LOW) == 3.0
+    assert base_cvss_for(None, Severity.INFO) == 1.0
+
+
+def test_base_cvss_for_falls_back_to_default_when_severity_unknown():
+    assert base_cvss_for(None, None) == 5.0
+
+
+# ------------------------------------------------- band-preservation invariants
+
+
+@pytest.mark.parametrize(
+    "asserted",
+    [
+        Severity.CRITICAL,
+        Severity.HIGH,
+        Severity.MEDIUM,
+        Severity.LOW,
+        Severity.INFO,
+    ],
+)
+def test_single_multiplier_cannot_change_asserted_tier(asserted):
+    """A lone exploitability bump (1.2) must not promote across a band.
+
+    The base values are chosen against the band floors precisely so that one
+    multiplier refines the ranking WITHIN a tier without overriding what the tool
+    asserted — e.g. 7.0 × 1.2 = 8.4, still HIGH.
+    """
+    score = compute_severity_score(
+        base_cvss=base_cvss_for(None, asserted),
+        corroboration_multiplier=1.0,
+        exploitability_multiplier=1.2,
+    )
+    assert _map_score_to_severity_enum(score) == asserted
+
+
+def test_high_with_poc_stays_high():
+    score = compute_severity_score(
+        base_cvss=base_cvss_for(None, Severity.HIGH),
+        corroboration_multiplier=1.0,
+        exploitability_multiplier=1.2,
+    )
+    assert score == pytest.approx(8.4)
+    assert _map_score_to_severity_enum(score) == Severity.HIGH
+
+
+def test_cross_engine_corroboration_can_promote_high_to_critical():
+    """Corroboration IS the signal worth promoting on: 7.0 × 1.3 × 1.2 → 10.0."""
+    score = compute_severity_score(
+        base_cvss=base_cvss_for(None, Severity.HIGH),
+        corroboration_multiplier=1.3,
+        exploitability_multiplier=1.2,
+    )
+    assert score == 10.0  # 10.92 → capped
+    assert _map_score_to_severity_enum(score) == Severity.CRITICAL
+
+
+def test_asserted_severities_do_not_all_collapse_to_medium():
+    """Regression: the flat default erased every tool's severity assertion.
+
+    38 of 39 raw findings on a live scan carried no CVSS, so every scored
+    Vulnerability landed on 5.0 → MEDIUM and the report had zero differentiation.
+    """
+    scored = {
+        asserted: _map_score_to_severity_enum(
+            compute_severity_score(
+                base_cvss=base_cvss_for(None, asserted),
+                corroboration_multiplier=1.0,
+                exploitability_multiplier=1.0,
+            )
+        )
+        for asserted in Severity
+    }
+    assert scored == {s: s for s in Severity}

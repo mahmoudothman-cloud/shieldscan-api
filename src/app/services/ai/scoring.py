@@ -16,20 +16,63 @@ from app.models.raw_findings import Severity
 # RawFinding.tool_name — NOT engine_name, which does not exist on the model.
 POC_PROVEN_TOOL_NAMES: frozenset[str] = frozenset({"nuclei", "sqlmap"})
 
-_DEFAULT_BASE_CVSS = 5.0  # Q9: medium default when cvss_score is null
+_DEFAULT_BASE_CVSS = 5.0  # Q9: medium default when the asserted severity is unknown
 _MAX_SEVERITY_SCORE = 10.0
+
+# Asserted-severity → base CVSS.
+#
+# Scanners assert risk qualitatively (ZAP Risk, nuclei severity, the sslyze rule
+# table) and almost never emit a CVSS vector: cvss_score is null on nearly every
+# raw finding. Feeding the flat _DEFAULT_BASE_CVSS into compute_severity_score
+# collapsed every scored Vulnerability onto ~5.0 → MEDIUM, erasing the tools'
+# own severity assertions from the report. Mapping the asserted severity onto the
+# CVSS scale keeps the multiplier formula meaningful when real CVSS is absent.
+#
+# The values are chosen against _CVSS_SEVERITY_BANDS so that a SINGLE multiplier
+# cannot move a finding out of its asserted tier (7.0 × 1.2 = 8.4, still HIGH),
+# while cross-engine corroboration — the signal worth promoting on — can
+# (7.0 × 1.3 × 1.2 → capped 10.0 → CRITICAL).
+_SEVERITY_BASE_CVSS: dict[Severity, float] = {
+    Severity.CRITICAL: 9.0,
+    Severity.HIGH: 7.0,
+    Severity.MEDIUM: 5.0,
+    Severity.LOW: 3.0,
+    Severity.INFO: 1.0,
+}
 
 # SPEC §8.3 corroboration multipliers (Q12: engine-distinct count within cluster).
 _CORROBORATION_SINGLE = 1.0
 _CORROBORATION_MULTI = 1.3  # corroborated by 2+ engines (DAST + SAST)
 
 # Standard CVSS band → Severity enum (Q11), highest band first.
+#
+# The LOW floor is 2.0 (not 0.0) so INFO is reachable in scored output. With the
+# original 4/0 floors anything under 4.0 became LOW and an INFO finding could not
+# survive scoring — which in turn made INFO-based filtering downstream impossible.
 _CVSS_SEVERITY_BANDS: tuple[tuple[float, Severity], ...] = (
     (9.0, Severity.CRITICAL),
     (7.0, Severity.HIGH),
     (4.0, Severity.MEDIUM),
-    (0.0, Severity.LOW),
+    (2.0, Severity.LOW),
+    (0.0, Severity.INFO),
 )
+
+
+def base_cvss_for(
+    cvss_score: float | None, asserted_severity: Severity | None
+) -> float:
+    """Resolve the scoring base for one finding (SPEC §8.3 base_cvss).
+
+    Precedence: a real CVSS score when the tool emitted one → the base derived
+    from the tool's asserted severity → _DEFAULT_BASE_CVSS for an unknown
+    severity. Never returns None, so compute_severity_score's own null-default is
+    only reachable by direct callers.
+    """
+    if cvss_score is not None:
+        return cvss_score
+    if asserted_severity is not None:
+        return _SEVERITY_BASE_CVSS.get(asserted_severity, _DEFAULT_BASE_CVSS)
+    return _DEFAULT_BASE_CVSS
 
 
 def compute_corroboration_multiplier(engine_count: int) -> float:
@@ -76,4 +119,4 @@ def _map_score_to_severity_enum(score: float) -> Severity:
     for threshold, severity in _CVSS_SEVERITY_BANDS:
         if score >= threshold:
             return severity
-    return Severity.LOW
+    return Severity.INFO  # unreachable for score >= 0 (the 0.0 band catches it)

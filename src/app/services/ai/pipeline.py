@@ -55,8 +55,13 @@ from app.services.ai.correlation import (
 from app.services.ai.cost_tracking import log_ai_call
 from app.services.ai.cwe_hierarchy import get_cwe_hierarchy
 from app.services.ai.fix_generation import _generate_fixes
+from app.services.ai.promotion_denylist import (
+    denylisted_plugin_ids,
+    is_promotion_denylisted,
+)
 from app.services.ai.scoring import (
     _map_score_to_severity_enum,
+    base_cvss_for,
     compute_corroboration_multiplier,
     compute_exploitability_multiplier,
     compute_severity_score,
@@ -310,6 +315,11 @@ async def _dedup_and_promote(
       - embedded + a >= 0.92 cluster hit  → append evidence (_merge_evidence)
       - embedded, no hit                  → promote (new Vuln) + upsert point
       - unembedded (degraded fallback)    → exact-fingerprint dedup + promote
+
+    Findings whose ``tool_metadata->>'plugin_id'`` is on the configured promotion
+    denylist are skipped entirely (no Vulnerability, no Qdrant point, no
+    promotion state). The filter is applied HERE and nowhere earlier:
+    ``raw_findings`` is the 90-day audit record (SPEC §5.4) and stays complete.
     """
     client = get_qdrant_client()
     collection = _collection_name(scan.organization_id)
@@ -322,7 +332,14 @@ async def _dedup_and_promote(
     # Degraded fallback: exact fingerprint → Vulnerability (Q3 D.b).
     fallback_by_fingerprint: dict[str, Vulnerability] = {}
 
+    denylist = denylisted_plugin_ids()  # resolved once per scan
+    skipped_denylisted = 0
+
     for finding in raw_findings:
+        if is_promotion_denylisted(finding, denylist):
+            skipped_denylisted += 1
+            continue
+
         vector = embeddings.get(finding.id)
 
         if vector is None:
@@ -353,6 +370,15 @@ async def _dedup_and_promote(
         )
         representatives[str(vuln.id)] = vuln
         await _upsert_finding(client, collection, point_id, vector, scan, finding, vuln)
+
+    if skipped_denylisted:
+        logger.info(
+            "ai-pipeline: scan %s skipped %d denylisted raw_findings at promotion "
+            "(plugin ids %s); they remain in raw_findings",
+            scan.id,
+            skipped_denylisted,
+            sorted(denylist),
+        )
 
 
 async def _correlate_vulnerabilities(*, db: AsyncSession, scan_id: UUID) -> None:
@@ -430,6 +456,13 @@ async def _score_vulnerabilities(*, db: AsyncSession, scan_id: UUID) -> None:
     corroborated_count set by the correlation pass (Q12) for the corroboration
     multiplier; derives exploitability from the contributing raw_findings'
     tool_name (Q10 PoC-derivation).
+
+    The base is resolved via ``base_cvss_for`` from the tool's ASSERTED severity
+    (captured below BEFORE the overwrite) whenever no real CVSS is present —
+    scanners almost never emit one, and a flat default collapsed every scored
+    Vulnerability onto MEDIUM. Overwriting ``vuln.severity`` with the scored enum
+    stays intentional (SPEC §8.3: the scored severity is the corroboration- and
+    exploitability-adjusted one); it just needs a correct base.
     """
     vulnerabilities = (
         (await db.execute(select(Vulnerability).where(Vulnerability.scan_id == scan_id)))
@@ -459,8 +492,11 @@ async def _score_vulnerabilities(*, db: AsyncSession, scan_id: UUID) -> None:
         ]
         corroboration = compute_corroboration_multiplier(vuln.corroborated_count)
         exploitability = compute_exploitability_multiplier(tool_names)
+        # Capture the tool's asserted severity BEFORE the overwrite below — it is
+        # the scoring base whenever the tool emitted no CVSS vector.
+        asserted_severity = vuln.severity
         score = compute_severity_score(
-            base_cvss=vuln.cvss_score,
+            base_cvss=base_cvss_for(vuln.cvss_score, asserted_severity),
             corroboration_multiplier=corroboration,
             exploitability_multiplier=exploitability,
         )
