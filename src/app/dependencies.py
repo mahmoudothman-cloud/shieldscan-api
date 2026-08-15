@@ -36,10 +36,11 @@ from typing import AsyncIterator, Awaitable, Callable, Literal
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
+from app.db.tenant_context import set_tenant_context
 from app.models.identity import APIKey, MembershipRole, User
 from app.redis_client import get_redis
 from app.services.auth import (
@@ -326,6 +327,12 @@ async def _update_api_key_last_used(key_id: UUID, when: datetime) -> None:
     time this task fires. Failures are logged but not surfaced — the
     caller's request must have already returned by the time we get
     here, so there's nothing to "fail" anyway.
+
+    NOTE — this is the only broad ``except Exception`` in the request path that
+    wraps a DB write AND swallows it. That is safe only because ``api_keys`` is
+    outside TENANT_TABLES by ADR-012, so the Phase-3b tenant guard never fires
+    here. If ``api_keys`` is ever brought under RLS, this becomes a site that
+    silently swallows MissingTenantContextError and must be narrowed first.
     """
     try:
         async with AsyncSessionLocal() as session:
@@ -386,9 +393,7 @@ async def _authenticate_api_key(
     key = result.scalar_one_or_none()
     if key is None:
         return None
-    await db.execute(
-        text(f"SET app.current_org_id = '{key.organization_id}'")
-    )
+    await set_tenant_context(db, key.organization_id)
     _maybe_schedule_last_used_update(key)
     return key
 
@@ -505,7 +510,7 @@ async def get_auth_identity(
         # tenant-scoped endpoint. Treat as 401 (same as user-deleted).
         raise _UNAUTHORIZED
     org_id, role = row
-    await db.execute(text(f"SET app.current_org_id = '{org_id}'"))
+    await set_tenant_context(db, org_id)
 
     return AuthIdentity(kind="jwt", organization_id=org_id, user=user, role=role)
 
@@ -560,9 +565,7 @@ def require_org_membership(jwt_only: bool = False) -> Callable:
         # the caller's primary org, but doing it here makes the pattern
         # uniform across endpoints and survives multi-org future work
         # where the path's org_id might not match the JWT's "primary".
-        from sqlalchemy import text as _text
-
-        await db.execute(_text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(db, org_id)
         return identity
 
     return _dep

@@ -30,8 +30,9 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import text
 
+
+from app.db.tenant_context import set_tenant_context
 from app.models.scans import Scan, ScanJob, ScanStatus
 from app.services.ai.pipeline import run
 from app.services.audit import ScanAction, audit
@@ -121,7 +122,7 @@ class AIPipelineConsumer:
             async with self._session_factory() as db:
                 # RLS preamble — org_uuid is a validated UUID (safe f-string),
                 # matching the completions_consumer convention.
-                await db.execute(text(f"SET app.current_org_id = '{org_uuid}'"))
+                await set_tenant_context(db, org_uuid)
                 await self._run_pipeline_and_finalize(db, scan_id)
         except Exception as exc:
             logger.exception(
@@ -195,9 +196,7 @@ class AIPipelineConsumer:
         """
         try:
             async with self._session_factory() as fail_db:
-                await fail_db.execute(
-                    text(f"SET app.current_org_id = '{org_uuid}'")
-                )
+                await set_tenant_context(fail_db, org_uuid)
                 scan = await fail_db.get(Scan, scan_id)
                 if scan is not None:
                     scan.status = ScanStatus.FAILED

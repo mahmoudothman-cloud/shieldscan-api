@@ -51,11 +51,18 @@ Multi-process duplicate handling (DRIFT-LOG H.4 + ADR-025):
 
 RLS:
   No request context — the consumer manages its own ``AsyncSession``
-  per event and SETs ``app.current_org_id`` from the event's
-  ``organization_id`` field before any RLS-scoped read or write.
-  Parameterized form (``text("SET app.current_org_id = :org_id"),
-  {"org_id": str(org_id)}``); matches the existing project pattern at
-  ``identity.py``, ``audit.py``, ``db/policies.py``.
+  per event and establishes tenant context from the event's
+  ``organization_id`` field, via ``db.tenant_context.set_tenant_context``,
+  before any RLS-scoped read or write.
+
+  This docstring previously described the form
+  ``text("SET app.current_org_id = :org_id"), {"org_id": ...}`` as what the
+  consumer used. That form does not work and was never used: PostgreSQL does
+  not accept a bind parameter on a bare ``SET`` (it raises ProgrammingError),
+  so every call site interpolated the uuid into the SQL string instead. The
+  helper now uses ``set_config('app.current_org_id', :org_id, false)``, which
+  is an ordinary function call and takes a real bind parameter — so the
+  statement is parameterized in fact rather than in description.
 
 Lifecycle:
   ``CompletionsConsumer.start()`` spawns the consume loop as an
@@ -83,13 +90,14 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
-from sqlalchemy import func, insert, select, text
+from sqlalchemy import func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import select_fresh
 from app.models.raw_findings import RawFinding
 from app.models.recon import AttackSurface, SubdomainStatus
+from app.db.tenant_context import set_tenant_context
 from app.models.scans import Scan, ScanJob, ScanStatus
 from app.schemas.raw_findings import RawFindingCreate
 from app.services.audit import ScanAction, audit
@@ -506,9 +514,7 @@ class CompletionsConsumer:
                 # RLS preamble. f-string is safe because org_uuid is a
                 # validated UUID. Mirrors existing _persist + project
                 # patterns (Phase-0 Deviation 3).
-                await db.execute(
-                    text(f"SET app.current_org_id = '{org_uuid}'")
-                )
+                await set_tenant_context(db, org_uuid)
 
                 stmt = pg_insert(AttackSurface).values(values)
                 stmt = stmt.on_conflict_do_update(
@@ -549,9 +555,7 @@ class CompletionsConsumer:
 
         try:
             async with self._session_factory() as dispatch_session:
-                await dispatch_session.execute(
-                    text(f"SET app.current_org_id = '{org_uuid}'")
-                )
+                await set_tenant_context(dispatch_session, org_uuid)
                 orchestrator = ScanOrchestrator(dispatch_session, self._redis)
                 await orchestrator.dispatch_phase2(scan_id=scan_id)
         except Exception:  # noqa: BLE001 — fail-loud per Q7 c.ii.B
@@ -561,9 +565,7 @@ class CompletionsConsumer:
                 scan_id,
             )
             async with self._session_factory() as fail_session:
-                await fail_session.execute(
-                    text(f"SET app.current_org_id = '{org_uuid}'")
-                )
+                await set_tenant_context(fail_session, org_uuid)
                 fail_orchestrator = ScanOrchestrator(fail_session, self._redis)
                 await fail_orchestrator._fail_scan_phase2(
                     scan_id, reason="phase2_dispatch_exception"
@@ -626,9 +628,7 @@ class CompletionsConsumer:
             # validated UUID (no SQL chars possible). Matches existing
             # project pattern at completions_consumer.py (pre-extension
             # line 177), identity.py, audit.py, db/policies.py.
-            await db.execute(
-                text(f"SET app.current_org_id = '{org_uuid}'")
-            )
+            await set_tenant_context(db, org_uuid)
 
             job = (
                 await select_fresh(
@@ -880,9 +880,7 @@ class CompletionsConsumer:
 
         try:
             async with self._session_factory() as dispatch_session:
-                await dispatch_session.execute(
-                    text(f"SET app.current_org_id = '{org_uuid}'")
-                )
+                await set_tenant_context(dispatch_session, org_uuid)
                 orchestrator = ScanOrchestrator(dispatch_session, self._redis)
                 await orchestrator.dispatch_ai_pipeline(scan_id=scan_id)
         except Exception:
@@ -891,9 +889,7 @@ class CompletionsConsumer:
                 scan_id,
             )
             async with self._session_factory() as fail_session:
-                await fail_session.execute(
-                    text(f"SET app.current_org_id = '{org_uuid}'")
-                )
+                await set_tenant_context(fail_session, org_uuid)
                 fail_scan = await fail_session.get(Scan, scan_id)
                 if fail_scan is not None:
                     fail_scan.status = ScanStatus.FAILED

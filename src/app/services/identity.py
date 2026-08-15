@@ -35,11 +35,13 @@ from typing import AsyncIterator
 from uuid import UUID
 
 import redis.asyncio as redis_asyncio
+
 from slugify import slugify
-from sqlalchemy import text
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.tenant_context import set_tenant_context
 from app.models.identity import Membership, MembershipRole, Organization, User
 from app.services.audit import AuthAction, audit
 from app.services.auth import hash_password
@@ -203,7 +205,7 @@ async def register_identity(
 
             # Set tenant GUC for RLS on audit_logs + future tenant tables.
             # shieldscan_app role cannot write to audit_logs without this.
-            await db.execute(text(f"SET app.current_org_id = '{org.id}'"))
+            await set_tenant_context(db, org.id)
 
             # User.
             user = User(

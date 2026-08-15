@@ -10,16 +10,50 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
+from app.db.tenant_context import ORG_APPLIED_KEY, TENANT_GUC, TenantSession
 
 engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
+
+
+@event.listens_for(engine.sync_engine, "reset")
+def _clear_tenant_context(dbapi_connection, connection_record, reset_state) -> None:
+    """Clear the tenant GUC when a connection returns to the pool.
+
+    ``SET app.current_org_id`` is non-LOCAL, so it lives on the connection and
+    survives the pool's default ROLLBACK-on-return. Without this, a request that
+    commits leaves its org on the connection, and the NEXT request to check that
+    connection out inherits it — demonstrated: a second session on the same
+    pooled connection read the first session's tenant rows.
+
+    Order is load-bearing. ``SET``/``RESET`` are themselves transactional, so a
+    bare RESET is undone by the pool's subsequent ROLLBACK and the context
+    leaks anyway. Rolling back FIRST, then resetting, was the only variant clean
+    across all three cases tested (clean check-in, check-in with an open
+    transaction, and sustained connection churn). ``DISCARD ALL`` also works but
+    is far broader — it drops prepared statements, plans and temp state — and it
+    raised ActiveSQLTransactionError on one path.
+
+    The applied-marker is cleared here too, in the same breath as the GUC, so
+    the marker can never outlive the context it attests to.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("ROLLBACK")
+        cursor.execute(f"RESET {TENANT_GUC}")
+    finally:
+        cursor.close()
+    connection_record.info.pop(ORG_APPLIED_KEY, None)
+
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
     class_=AsyncSession,
+    sync_session_class=TenantSession,
     expire_on_commit=False,
 )
 

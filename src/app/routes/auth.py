@@ -39,6 +39,7 @@ import time
 from uuid import UUID
 
 from app.config import settings
+from app.db.tenant_context import set_tenant_context
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -282,10 +283,8 @@ async def _first_org_id_for(db: AsyncSession, user_id: UUID) -> UUID | None:
     )
     row = result.scalar_one_or_none()
     if row is not None:
-        # Set the GUC so audit's WITH CHECK succeeds.
-        from sqlalchemy import text
-
-        await db.execute(text(f"SET app.current_org_id = '{row}'"))
+        # Set the tenant context so audit's WITH CHECK succeeds.
+        await set_tenant_context(db, row)
     return row
 
 
