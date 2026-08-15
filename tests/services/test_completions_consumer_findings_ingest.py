@@ -511,17 +511,39 @@ def test_build_finding_dicts_empty_input_returns_empty() -> None:
     assert c._build_finding_dicts([]) == []
 
 
-def test_build_finding_dicts_validates_via_pydantic() -> None:
-    """Invalid finding raises ValidationError (Pydantic strictness)."""
-    from pydantic import ValidationError
+def test_build_finding_dicts_isolates_a_bad_finding_from_the_batch() -> None:
+    """One malformed finding must not take the rest of the batch with it.
 
+    Regression pin for d396894. This test previously asserted that
+    ``_build_finding_dicts`` RAISES ValidationError; d396894 deliberately
+    changed it to log-and-skip per finding, so the assertion was stale and the
+    suite stayed red. The behaviour that commit was actually about is
+    per-finding FAULT ISOLATION: before it, one bad zap event aborted the
+    engine's whole batch at insert time and discarded all 608 findings, and the
+    same class of failure hid nmap's output for 14 runs.
+
+    Asserting only "the bad finding is dropped" would be satisfied by an
+    implementation that drops the whole batch, so the batch here is
+    good / BAD / good:
+
+      * raise-on-any            -> no dicts survive          -> fails
+      * abort-at-first-error    -> only the leading good one -> fails
+      * correct isolation       -> both good ones survive    -> passes
+
+    The survivors are identified by title, not just counted, so a bug that
+    returns duplicates of one finding also fails.
+    """
     c = _make_consumer()
-    raw = {
-        "tool_name": "nuclei",
-        # missing required fields
-    }
-    with pytest.raises(ValidationError):
-        c._build_finding_dicts([raw])
+    batch = [
+        _wire_finding(title="good-before", fingerprint="a" * 64),
+        {"tool_name": "nuclei"},  # malformed: missing required fields
+        _wire_finding(title="good-after", fingerprint="b" * 64),
+    ]
+
+    dicts = c._build_finding_dicts(batch)
+
+    assert [d["title"] for d in dicts] == ["good-before", "good-after"]
+    assert all(d["tool_name"] == "nuclei" for d in dicts)
 
 
 # ============================================================================
