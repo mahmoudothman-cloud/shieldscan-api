@@ -78,13 +78,18 @@ TEST_DB_NAME = "shieldscan_test"
 
 
 def _test_database_url() -> str:
-    """Derive the test-database URL from the app's configured DATABASE_URL.
+    """OWNER url for the test database — schema DDL, policies, GRANTs.
 
-    No credential is hardcoded in this tracked file: the password lives only in
-    .env (gitignored), so rotating the Postgres password requires no change
-    here. The database name is always replaced with ``shieldscan_test``, which
-    also makes it impossible for an exported DATABASE_URL to point a test run at
-    the development database.
+    Derived from MIGRATION_DATABASE_URL, NOT from DATABASE_URL. Post-cutover
+    DATABASE_URL names the non-superuser app role, which cannot drop or create
+    tables: deriving DDL from it fails with "must be owner of table". Only
+    falls back to DATABASE_URL when the split is unconfigured (pre-cutover),
+    where the two are the same owner url anyway.
+
+    No credential is hardcoded in this tracked file — the passwords live only in
+    .env (gitignored). The database name is always replaced with
+    ``shieldscan_test``, so an exported url can never point a test run at the
+    development database.
 
     Imported here rather than at module top so the stub env vars above are in
     place before Settings() validates.
@@ -93,15 +98,13 @@ def _test_database_url() -> str:
 
     from app.config import settings
 
-    url = make_url(settings.DATABASE_URL).set(database=TEST_DB_NAME)
+    owner = settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL
     # render_as_string(hide_password=False) — plain str(URL) masks the password
     # as "***", which would produce an unusable URL.
-    resolved = url.render_as_string(hide_password=False)
-
-    # app.db builds its engine from settings.DATABASE_URL at import time, so the
-    # singleton and the environment must agree before any model module loads.
-    settings.DATABASE_URL = resolved
-    os.environ["DATABASE_URL"] = resolved
+    resolved = (
+        make_url(owner).set(database=TEST_DB_NAME).render_as_string(hide_password=False)
+    )
+    settings.MIGRATION_DATABASE_URL = resolved
     return resolved
 
 
@@ -131,7 +134,7 @@ def _test_app_database_url() -> str:
             "it exercises the same path production does; set it in .env "
             "(and ALTER ROLE shieldscan_app WITH PASSWORD to match)."
         )
-    return (
+    resolved = (
         make_url(TEST_DATABASE_URL)
         .set(
             username=settings.APP_DB_USER,
@@ -140,6 +143,12 @@ def _test_app_database_url() -> str:
         )
         .render_as_string(hide_password=False)
     )
+    # app.db builds its engine from settings.DATABASE_URL at import time, and
+    # AsyncSessionLocal must reach the TEST database as the APP role — the same
+    # identity production uses. Set before any model module loads.
+    settings.DATABASE_URL = resolved
+    os.environ["DATABASE_URL"] = resolved
+    return resolved
 
 
 TEST_APP_DATABASE_URL = _test_app_database_url()
