@@ -21,7 +21,6 @@ from uuid import uuid4
 import pytest
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import select
-from sqlalchemy.sql import text
 
 from app.services.ai import pipeline as pipeline_mod
 
@@ -34,6 +33,7 @@ from app.services.ai_pipeline_consumer import AIPipelineConsumer
 from app.services.audit import ScanAction
 from app.services.auth import hash_password
 from app.services.completions_consumer import CompletionsConsumer
+from app.db.tenant_context import set_tenant_context
 from tests.conftest import use_org
 
 
@@ -145,7 +145,7 @@ def _completion_event(job, org_id, status="completed"):
 
 async def _scan_status(session_factory, org_id, scan_id):
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         return (
             await fresh.execute(select(Scan).where(Scan.id == scan_id))
         ).scalar_one().status
@@ -153,7 +153,7 @@ async def _scan_status(session_factory, org_id, scan_id):
 
 async def _audit_actions(session_factory, org_id, scan_id):
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         rows = (
             await fresh.execute(
                 select(AuditLog.action).where(AuditLog.resource_id == scan_id)

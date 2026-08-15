@@ -108,6 +108,43 @@ def _test_database_url() -> str:
 TEST_DATABASE_URL = _test_database_url()
 
 
+def _test_app_database_url() -> str:
+    """Test URL for the NON-SUPERUSER app role — how production connects.
+
+    The suite used to reach the enforced path via ``SET ROLE`` from the owner
+    connection. That is not what production does, and the divergence is exactly
+    what let the original gap survive: the fixture exercised RLS while the app
+    served every request as a superuser that bypassed it. Connecting the test
+    sessions as ``shieldscan_app`` removes the divergence.
+
+    Derived independently of DATABASE_URL so it is stable across the cutover —
+    before the flip DATABASE_URL names the owner, after it names the app role,
+    and this must name the app role either way.
+    """
+    from sqlalchemy.engine import make_url
+
+    from app.config import settings
+
+    if not settings.APP_DB_PASSWORD:
+        raise RuntimeError(
+            "APP_DB_PASSWORD is not set. The suite connects as the app role so "
+            "it exercises the same path production does; set it in .env "
+            "(and ALTER ROLE shieldscan_app WITH PASSWORD to match)."
+        )
+    return (
+        make_url(TEST_DATABASE_URL)
+        .set(
+            username=settings.APP_DB_USER,
+            password=settings.APP_DB_PASSWORD,
+            database=TEST_DB_NAME,
+        )
+        .render_as_string(hide_password=False)
+    )
+
+
+TEST_APP_DATABASE_URL = _test_app_database_url()
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     # Import here so environment overrides above take effect before model
@@ -122,12 +159,19 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     # schema is small (handful of tables); create_all/drop_all per test is
     # cheap and avoids cross-test state leakage.
     from app.db.policies import (
-        APP_ROLE_NAME,
         app_role_upgrade_sql,
         audit_triggers_upgrade_sql,
         rls_upgrade_sql,
     )
 
+    from app.db.tenant_context import TenantSession
+    from app.db.tenant_guard import install_tenant_guard
+
+    # The guard is active for the whole suite: a converted call site that
+    # writes the SET but not the session intent must fail HERE, not in prod.
+    install_tenant_guard()
+
+    # Schema + policies + grants run as the OWNER (DDL, CREATE ROLE).
     engine = create_async_engine(TEST_DATABASE_URL, echo=False, future=True)
     async with engine.begin() as conn:
         # drop_all cascades to drop each table's triggers + policies, so
@@ -141,39 +185,44 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
         for sql in app_role_upgrade_sql():
             await conn.execute(text(sql))
 
-    # Bind the AsyncSession to a single persistent connection (not the
-    # engine directly). Two reasons:
-    #   1. A session-level `SET app.current_org_id` must survive commits,
-    #      which only happens if the session holds the same connection
-    #      across transactions.
-    #   2. We `SET ROLE shieldscan_app` on this connection so RLS actually
-    #      applies. The owner role (`shieldscan`, POSTGRES_USER) is a
-    #      superuser and therefore bypasses RLS unconditionally — FORCE RLS
-    #      does NOT override that. Running as a non-superuser role is the
-    #      only way to make policies apply in tests.
-    connection = await engine.connect()
-    await connection.execute(text(f"SET ROLE {APP_ROLE_NAME};"))
-    session = AsyncSession(bind=connection, expire_on_commit=False)
+    # The session is still bound to one connection so a test's GUC survives its
+    # commits. Production does NOT pin a connection — TenantSession.after_begin
+    # re-applies the context per transaction instead — but pinning here keeps
+    # the fixture simple and does not change what the guard verifies.
+    await engine.dispose()
+
+    # Sessions connect AS the app role — no SET ROLE. Production connects this
+    # way, so the suite now takes the same path rather than simulating it.
+    # TenantSession carries the after_begin re-apply and the guard.
+    app_engine = create_async_engine(TEST_APP_DATABASE_URL, echo=False, future=True)
+    connection = await app_engine.connect()
+    session = AsyncSession(
+        bind=connection,
+        sync_session_class=TenantSession,
+        expire_on_commit=False,
+    )
     try:
         yield session
     finally:
         await session.close()
         await connection.close()
-    await engine.dispose()
+    await app_engine.dispose()
 
 
 async def use_org(session: AsyncSession, org_id: UUID | str) -> None:
     """Set the session-local tenant for RLS checks.
 
-    Every test that writes to a tenant-scoped table MUST call this after
-    creating (and flushing) its Organization — otherwise RLS's
-    `WITH CHECK (organization_id = current_setting('app.current_org_id'))`
-    rejects the insert.
+    Every test that touches a tenant-scoped table MUST call this after creating
+    (and flushing) its Organization — otherwise the policy's WITH CHECK rejects
+    the insert, and the tenant guard rejects the read.
+
+    Delegates to the production setter so the harness cannot drift from it: it
+    records the session intent AND applies the GUC, which is exactly the pairing
+    the guard verifies.
     """
-    # Use SET (session-level), not SET LOCAL, so it survives test-level
-    # session.commit() calls. Each test gets a fresh connection+engine, so
-    # no cross-test leakage.
-    await session.execute(text(f"SET app.current_org_id = '{org_id}'"))
+    from app.db.tenant_context import set_tenant_context
+
+    await set_tenant_context(session, org_id)
 
 
 # ---------------------------------------------------------------- harness fixtures
@@ -206,11 +255,21 @@ async def session_factory(db_session):
     """
     from sqlalchemy.ext.asyncio import AsyncSession as _S
 
+    from app.db.tenant_context import TenantSession as _TenantSession
+
     connection = db_session.bind  # AsyncConnection (test owns lifecycle)
 
     class _Factory:
         async def __aenter__(self):
-            self._session = _S(bind=connection, expire_on_commit=False)
+            # TenantSession, not a bare AsyncSession: the consumers are 8 of
+            # the 13 converted call sites, and a plain session would bypass
+            # both the after_begin re-apply and the tenant guard — hollowing
+            # out the pre-flight for exactly the code it needs to prove.
+            self._session = _S(
+                bind=connection,
+                sync_session_class=_TenantSession,
+                expire_on_commit=False,
+            )
             return self._session
 
         async def __aexit__(self, *exc):

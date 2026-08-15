@@ -8,6 +8,7 @@ commit when ``get_db`` first needed ``AsyncSessionLocal``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import event
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.config import settings
 from app.db.tenant_context import ORG_APPLIED_KEY, TENANT_GUC, TenantSession
+from app.db.tenant_guard import install_tenant_guard
 
 engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
 
@@ -56,6 +58,20 @@ AsyncSessionLocal = async_sessionmaker(
     sync_session_class=TenantSession,
     expire_on_commit=False,
 )
+
+
+# Tenant guard, installed at engine setup so the decision is made once per
+# process. The flag governs THIS ONLY — never the after_begin re-apply or the
+# reset handler above, whose off-state leaks tenant context between requests.
+if settings.TENANT_GUARD_ENABLED:
+    install_tenant_guard()
+else:
+    logging.getLogger(__name__).warning(
+        "TENANT_GUARD_ENABLED is false — queries against tenant tables will "
+        "NOT be checked for tenant context. A missing context now yields a "
+        "SILENT empty result instead of an error. This should only ever be a "
+        "temporary incident measure; re-enable it."
+    )
 
 
 async def select_fresh(db: AsyncSession, stmt: Any) -> Result[Any]:

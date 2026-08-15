@@ -25,6 +25,7 @@ from sqlalchemy import text
 
 from app.db.policies import CREDENTIAL_INDEXED_TABLES, TENANT_TABLES
 from app.models.identity import APIKey, Organization
+from app.db.tenant_context import set_tenant_context
 
 
 @pytest.mark.asyncio
@@ -40,7 +41,7 @@ async def test_api_keys_readable_by_hash_without_tenant_context(db_session):
     org = Organization(name="Org R", slug=f"orgr-{uuid4().hex[:8]}")
     db_session.add(org)
     await db_session.flush()
-    await db_session.execute(text(f"SET app.current_org_id = '{org.id}'"))
+    await set_tenant_context(db_session, org.id)
 
     plaintext = "ss_live_carveout_test_plaintext_42ff"
     key_hash = hashlib.sha256(plaintext.encode()).hexdigest()

@@ -3,7 +3,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    # Runtime connection. Points at the non-superuser app role
+    # (shieldscan_app) once the RLS cutover happens; a superuser here bypasses
+    # RLS unconditionally, which is the gap the cutover closes.
     DATABASE_URL: str
+    # Owner connection (shieldscan), used ONLY by alembic and
+    # scripts/verify_rls_verbose.py — both do DDL and CREATE ROLE, which the
+    # app role cannot and must not be able to do. Falls back to DATABASE_URL
+    # when unset so nothing breaks before the split is configured.
+    MIGRATION_DATABASE_URL: str | None = None
+    # App-role credentials, used by the test harness to connect its sessions
+    # the same way production will. Kept separate from DATABASE_URL so the
+    # suite exercises the enforced path before and after the cutover.
+    APP_DB_USER: str = "shieldscan_app"
+    APP_DB_PASSWORD: str | None = None
+    # Kill-switch for the tenant guard ONLY (app/db/tenant_guard.py). Never
+    # governs the after_begin re-apply or the pool reset handler: their
+    # off-state was demonstrated to leak tenant context between requests,
+    # which is strictly worse than the guard raising. Default ON; a disabled
+    # guard logs at WARNING on every startup.
+    TENANT_GUARD_ENABLED: bool = True
     REDIS_URL: str
     QDRANT_URL: str
     ANTHROPIC_API_KEY: str

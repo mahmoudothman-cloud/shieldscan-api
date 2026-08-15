@@ -24,6 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.models.identity import Organization, User
+from app.db.tenant_context import set_tenant_context
 
 
 def _register_payload(email: str, *, org: str = "Co"):
@@ -101,7 +102,7 @@ async def test_db_rejects_non_normalized_email_insert(db_session):
     org = Organization(name="CheckOrg", slug=f"checkorg-{uuid4().hex[:8]}")
     db_session.add(org)
     await db_session.flush()
-    await db_session.execute(text(f"SET app.current_org_id = '{org.id}'"))
+    await set_tenant_context(db_session, org.id)
 
     with pytest.raises(IntegrityError):
         await db_session.execute(

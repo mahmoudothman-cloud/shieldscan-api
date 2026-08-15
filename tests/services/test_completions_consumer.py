@@ -34,6 +34,7 @@ from app.models.projects import Project
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
 from app.services.auth import hash_password
 from app.services.completions_consumer import CompletionsConsumer
+from app.db.tenant_context import set_tenant_context
 from tests.conftest import use_org
 
 
@@ -47,6 +48,8 @@ async def session_factory(db_session):
     ``db_session.bind.engine``.
     """
     from sqlalchemy.ext.asyncio import AsyncSession as _S
+
+    from app.db.tenant_context import TenantSession as _TenantSession
     connection = db_session.bind  # AsyncConnection (test owns lifecycle)
 
     # Each "factory call" yields a NEW AsyncSession bound to the SAME
@@ -56,7 +59,15 @@ async def session_factory(db_session):
     # app.current_org_id + committed visibility all line up.
     class _Factory:
         async def __aenter__(self):
-            self._session = _S(bind=connection, expire_on_commit=False)
+            # TenantSession, not a bare AsyncSession: the consumers are 8 of
+            # the 13 converted call sites, and a plain session would bypass
+            # both the after_begin re-apply and the tenant guard — hollowing
+            # out the pre-flight for exactly the code it needs to prove.
+            self._session = _S(
+                bind=connection,
+                sync_session_class=_TenantSession,
+                expire_on_commit=False,
+            )
             return self._session
 
         async def __aexit__(self, *exc):
@@ -165,8 +176,7 @@ async def test_consumer_updates_scan_job_on_completion_event(
     # session). Use raw text to bypass any identity-map caching in
     # the test fixture's session.
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         result = await fresh.execute(select(ScanJob).where(ScanJob.id == job.id))
         updated = result.scalar_one()
         assert updated.status == "completed"
@@ -198,8 +208,7 @@ async def test_consumer_aggregates_scan_status_when_all_jobs_terminal(
         await consumer._handle(_completion_event(job))
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         scan_row = (
             await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
         ).scalar_one()
@@ -233,8 +242,7 @@ async def test_consumer_marks_scan_partial_when_some_jobs_failed(
     await consumer._handle(_completion_event(s["jobs"][2], status="failed"))
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         scan_row = (
             await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
         ).scalar_one()
@@ -258,8 +266,7 @@ async def test_consumer_ignores_unknown_event_types(scan_with_jobs, fake_redis, 
     await consumer._handle(event)
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         result = await fresh.execute(select(ScanJob).where(ScanJob.id == job.id))
         unchanged = result.scalar_one()
         assert unchanged.status == "running"  # unchanged
@@ -308,8 +315,7 @@ async def test_consumer_does_not_audit_per_job(scan_with_jobs, fake_redis, sessi
     await consumer._handle(_completion_event(s["jobs"][1]))
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         # Zero scan-domain audits at this point.
         scan_audits = (
             await fresh.execute(
@@ -326,8 +332,7 @@ async def test_consumer_does_not_audit_per_job(scan_with_jobs, fake_redis, sessi
     await consumer._handle(_completion_event(s["jobs"][2]))
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         scan_audits = (
             await fresh.execute(
                 select(AuditLog).where(
@@ -364,8 +369,7 @@ async def test_consumer_does_not_overwrite_canceled_scan(
 
     # Cancel the scan at scan-level (simulates the 4.5 cancel endpoint).
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         scan_row = (
             await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
         ).scalar_one()
@@ -381,8 +385,7 @@ async def test_consumer_does_not_overwrite_canceled_scan(
         await consumer._handle(_completion_event(job))
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         final = (
             await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
         ).scalar_one()
@@ -471,8 +474,7 @@ async def test_handle_attack_surface_inserts_subdomains(
     await consumer._handle(event)
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
@@ -539,8 +541,7 @@ async def test_handle_attack_surface_upserts_on_conflict(
     await consumer._handle(event_v2)
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
@@ -574,8 +575,7 @@ async def test_handle_attack_surface_rls_isolation(
     # Read as a DIFFERENT org_id — RLS must hide rows.
     other_org_id = uuid4()
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{other_org_id}'"))
+        await set_tenant_context(fresh, other_org_id)
         rows = (
             await fresh.execute(
                 select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
@@ -617,8 +617,7 @@ async def test_handle_attack_surface_malformed_url_skipped(
     await consumer._handle(event)
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
@@ -648,8 +647,7 @@ async def test_handle_attack_surface_empty_subdomains_handled(
     await consumer._handle(event)  # must not raise
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
@@ -685,8 +683,7 @@ async def test_handle_attack_surface_missing_optional_fields(
     await consumer._handle(event)
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(AttackSurface).where(AttackSurface.scan_id == s["scan"].id)
@@ -843,8 +840,7 @@ async def test_handle_attack_surface_triggers_phase2_dispatch(
 
     # QUICK non-recon tools = (nuclei, sslyze) → 2 tools × 2 targets = 4 jobs.
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         tool_jobs = (
             await fresh.execute(
                 select(ScanJob).where(
@@ -888,8 +884,7 @@ async def test_handle_attack_surface_phase2_no_dispatch_audit_fail_loud(
     await consumer._handle_attack_surface(event)
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         fresh_scan = await fresh.get(Scan, s["scan"].id)
         assert fresh_scan.status == ScanStatus.FAILED
         fail_audits = (
@@ -929,8 +924,7 @@ async def test_handle_attack_surface_empty_surface_still_triggers_phase2(
     await consumer._handle_attack_surface(event)
 
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         phase2_audits = (
             await fresh.execute(
                 select(AuditLog).where(
@@ -983,8 +977,7 @@ async def test_recon_first_e2e_via_consumer(
 
     # Phase-2 tool jobs created end-to-end.
     async with session_factory() as fresh:
-        from sqlalchemy import text as _text
-        await fresh.execute(_text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         tool_jobs = (
             await fresh.execute(
                 select(ScanJob).where(

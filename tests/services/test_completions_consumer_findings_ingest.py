@@ -26,7 +26,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession as _SQLAS
 
 from app.models.identity import Membership, MembershipRole, Organization, User
@@ -35,6 +35,7 @@ from app.models.raw_findings import RawFinding as RawFindingModel
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
 from app.services.auth import hash_password
 from app.services.completions_consumer import CompletionsConsumer
+from app.db.tenant_context import set_tenant_context
 from tests.conftest import use_org
 
 
@@ -689,7 +690,7 @@ async def test_single_event_inserts_findings_and_updates_scanjob(
 
     # Verify findings persisted with correct org + scan + tool_name.
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -733,9 +734,7 @@ async def test_rls_session_local_set_before_insert(
 
     # Create a second org (sibling) for the cross-org RLS check.
     async with session_factory_int() as bootstrap:
-        await bootstrap.execute(
-            text(f"SET app.current_org_id = '{s['org'].id}'")
-        )
+        await set_tenant_context(bootstrap, s['org'].id)
         other_org = Organization(name="Other", slug=f"other-{uuid4().hex[:8]}")
         bootstrap.add(other_org)
         await bootstrap.commit()
@@ -751,7 +750,7 @@ async def test_rls_session_local_set_before_insert(
 
     # Read under the OTHER org's context — RLS must hide the finding.
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{other_org_id}'"))
+        await set_tenant_context(fresh, other_org_id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -767,7 +766,7 @@ async def test_rls_session_local_set_before_insert(
 
     # Read under the CORRECT org's context — RLS must show the finding.
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -817,7 +816,7 @@ async def test_atomic_txn_rollback_on_insert_failure(
 
     # Verify rollback: no rows + ScanJob unchanged.
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -864,9 +863,7 @@ async def test_org_isolation_via_rls(
 
     # Set up a foreign org context.
     async with session_factory_int() as fresh:
-        await fresh.execute(
-            text(f"SET app.current_org_id = '{s['org'].id}'")
-        )
+        await set_tenant_context(fresh, s['org'].id)
         foreign_org = Organization(name="Foreign", slug=f"frgn-{uuid4().hex[:8]}")
         fresh.add(foreign_org)
         await fresh.commit()
@@ -874,7 +871,7 @@ async def test_org_isolation_via_rls(
 
     # Cross-org SELECT — RLS hides everything.
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{foreign_org_id}'"))
+        await set_tenant_context(fresh, foreign_org_id)
         rows = (
             await fresh.execute(select(RawFindingModel))
         ).scalars().all()
@@ -924,7 +921,7 @@ async def test_bulk_insert_performance_under_1000_findings_under_500ms(
 
     # Sanity: rows landed.
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         count = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -1024,7 +1021,7 @@ async def test_consumer_aggregates_sequenced_findings(
     assert len(consumer._accumulator[key]) == 833
 
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -1049,7 +1046,7 @@ async def test_consumer_aggregates_sequenced_findings(
     assert len(consumer._accumulator[key]) == 1666
 
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -1071,7 +1068,7 @@ async def test_consumer_aggregates_sequenced_findings(
 
     # Assert: 2500 rows persisted; ScanJob updated; accumulator cleared.
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -1115,7 +1112,7 @@ async def test_failed_status_no_findings_ingest(
     await consumer._handle(event)
 
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -1146,7 +1143,7 @@ async def test_canceled_status_no_findings_ingest(
     await consumer._handle(event)
 
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(
@@ -1182,7 +1179,7 @@ async def test_findings_array_empty_no_insert(
     await consumer._handle(event)
 
     async with session_factory_int() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{s['org'].id}'"))
+        await set_tenant_context(fresh, s['org'].id)
         rows = (
             await fresh.execute(
                 select(RawFindingModel).where(

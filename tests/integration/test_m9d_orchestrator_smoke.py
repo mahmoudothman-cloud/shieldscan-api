@@ -14,7 +14,6 @@ from __future__ import annotations
 from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.sql import text
 
 from app.models.identity import Organization
 from app.models.projects import Project
@@ -22,6 +21,7 @@ from app.models.raw_findings import EngineCategory
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
 from app.services import ai_pipeline_consumer as consumer_mod
 from app.services.ai_pipeline_consumer import AIPipelineConsumer
+from app.db.tenant_context import set_tenant_context
 from tests.conftest import use_org
 from tests.services.ai.conftest import (
     FakeEmbeddings,
@@ -95,7 +95,7 @@ def _payload(org, scan):
 
 async def _read_scan(session_factory, org_id, scan_id):
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         return (
             await fresh.execute(select(Scan).where(Scan.id == scan_id))
         ).scalar_one()

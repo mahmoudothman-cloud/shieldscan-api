@@ -18,7 +18,12 @@ from app.models.base import Base  # noqa: E402
 import app.models  # noqa: F401, E402  (triggers app/models/__init__.py to import every model module)
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Migrations run as the OWNER role, never as the app role: they do DDL and
+# CREATE ROLE, which shieldscan_app cannot and must not be able to do.
+# Falls back to DATABASE_URL when the split is not configured.
+config.set_main_option(
+    "sqlalchemy.url", settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL
+)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

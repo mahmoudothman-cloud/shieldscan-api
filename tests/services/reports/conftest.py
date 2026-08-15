@@ -11,11 +11,11 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest_asyncio
-from sqlalchemy import text
 
 from app.models.identity import Organization
 from app.models.projects import Project
 from app.models.scans import Scan, ScanStatus, ScanType
+from app.db.tenant_context import set_tenant_context
 
 
 @pytest_asyncio.fixture
@@ -27,7 +27,7 @@ async def report_scan(db_session):
     org = Organization(name="Report Org", slug=f"rptorg-{uuid4().hex[:8]}")
     db_session.add(org)
     await db_session.flush()
-    await db_session.execute(text(f"SET app.current_org_id = '{org.id}'"))
+    await set_tenant_context(db_session, org.id)
 
     project = Project(
         organization_id=org.id,

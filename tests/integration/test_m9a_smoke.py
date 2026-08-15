@@ -22,7 +22,6 @@ from uuid import uuid4
 import pytest
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import func, select
-from sqlalchemy.sql import text
 
 from app.models.audit import AuditLog
 from app.models.identity import Membership, MembershipRole, Organization, User
@@ -37,6 +36,7 @@ from app.services.ai_pipeline_consumer import AIPipelineConsumer
 from app.services.audit import ScanAction
 from app.services.auth import create_access_token, hash_password
 from app.services.completions_consumer import CompletionsConsumer
+from app.db.tenant_context import set_tenant_context
 from tests.conftest import use_org
 
 
@@ -135,7 +135,7 @@ def _completion_event(job, org_id, status="completed"):
 
 async def _scan_status(session_factory, org_id, scan_id):
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         return (
             (await fresh.execute(select(Scan).where(Scan.id == scan_id)))
             .scalar_one()
@@ -145,7 +145,7 @@ async def _scan_status(session_factory, org_id, scan_id):
 
 async def _vulns(session_factory, org_id, scan_id):
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         return (
             (
                 await fresh.execute(
@@ -159,7 +159,7 @@ async def _vulns(session_factory, org_id, scan_id):
 
 async def _audit_actions(session_factory, org_id, scan_id):
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         return set(
             (
                 await fresh.execute(
@@ -230,7 +230,7 @@ async def test_m9a_smoke_clustering_yields_one_vulnerability_per_cluster(
     )
     # Move directly to the AI phase (the completions path is covered above).
     async with session_factory() as s:
-        await s.execute(text(f"SET app.current_org_id = '{org.id}'"))
+        await set_tenant_context(s, org.id)
         sc = (await s.execute(select(Scan).where(Scan.id == scan.id))).scalar_one()
         sc.status = ScanStatus.ANALYZING
         await s.commit()

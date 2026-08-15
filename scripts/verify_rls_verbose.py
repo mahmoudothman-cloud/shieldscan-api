@@ -34,8 +34,9 @@ TEST_DB_NAME = "shieldscan_test"
 # database name to shieldscan_test: no credential in this tracked file, and no
 # way to point this destructive script (it drop_all's) at the dev database.
 # render_as_string(hide_password=False) — plain str(URL) masks the password.
+# Owner URL: this script does drop_all/create_all + CREATE ROLE.
 TEST_DATABASE_URL = (
-    make_url(settings.DATABASE_URL)
+    make_url(settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL)
     .set(database=TEST_DB_NAME)
     .render_as_string(hide_password=False)
 )

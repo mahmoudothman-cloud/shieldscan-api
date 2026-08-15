@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.sql import text
 
 from app.models.audit import AuditLog
 from app.models.identity import Membership, MembershipRole, Organization, User
@@ -23,6 +22,7 @@ from app.services import ai_pipeline_consumer as consumer_mod
 from app.services.ai_pipeline_consumer import AIPipelineConsumer
 from app.services.audit import ScanAction
 from app.services.auth import hash_password
+from app.db.tenant_context import set_tenant_context
 from tests.conftest import use_org
 
 
@@ -84,7 +84,7 @@ def _payload(org, scan):
 
 async def _read_scan(session_factory, org_id, scan_id):
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org_id}'"))
+        await set_tenant_context(fresh, org_id)
         return (
             await fresh.execute(select(Scan).where(Scan.id == scan_id))
         ).scalar_one()
@@ -150,7 +150,7 @@ async def test_consumer_emits_scan_completed_audit(
     await c._process(_payload(org, scan))
 
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org.id}'"))
+        await set_tenant_context(fresh, org.id)
         audits = (
             await fresh.execute(
                 select(AuditLog).where(
@@ -194,7 +194,7 @@ async def test_consumer_skips_scan_not_in_analyzing(
     org, scan = await _seed_analyzing_scan(db_session, job_statuses=("completed",))
     # Flip to COMPLETED before processing — a re-delivered message must skip.
     async with session_factory() as s:
-        await s.execute(text(f"SET app.current_org_id = '{org.id}'"))
+        await set_tenant_context(s, org.id)
         sc = (await s.execute(select(Scan).where(Scan.id == scan.id))).scalar_one()
         sc.status = ScanStatus.COMPLETED
         await s.commit()
@@ -203,7 +203,7 @@ async def test_consumer_skips_scan_not_in_analyzing(
     await c._process(_payload(org, scan))  # no-op (not ANALYZING)
 
     async with session_factory() as fresh:
-        await fresh.execute(text(f"SET app.current_org_id = '{org.id}'"))
+        await set_tenant_context(fresh, org.id)
         audits = (
             await fresh.execute(
                 select(AuditLog).where(

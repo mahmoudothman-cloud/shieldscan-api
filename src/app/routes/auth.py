@@ -261,16 +261,27 @@ async def login(
         raise _UNAUTH
 
     # Success path — audit + tokens.
-    await audit(
-        db,
-        organization_id=org_id,
-        actor_id=user.id,
-        action=AuthAction.LOGIN_SUCCESS,
-        resource_type="user",
-        resource_id=user.id,
-        ip_address=ip,
-        user_agent=ua,
-    )
+    #
+    # Skip the audit when the user has no membership, matching the failure
+    # path above and every other audit site in this module. audit_logs is
+    # tenant-scoped and NOT NULL on organization_id, so a membership-less user
+    # has no tenant the row could be attributed to: previously this raised
+    # IntegrityError, and once the tenant guard is enabled it raises
+    # MissingTenantContextError instead — neither is a login failure the user
+    # caused. This was the ONLY unguarded audit call reachable with a null org
+    # (change_password's is safe: get_auth_identity 401s a user with zero
+    # memberships before the handler runs).
+    if org_id is not None:
+        await audit(
+            db,
+            organization_id=org_id,
+            actor_id=user.id,
+            action=AuthAction.LOGIN_SUCCESS,
+            resource_type="user",
+            resource_id=user.id,
+            ip_address=ip,
+            user_agent=ua,
+        )
     await db.commit()
     return _tokens_for(user)
 

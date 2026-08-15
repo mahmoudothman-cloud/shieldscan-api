@@ -21,6 +21,7 @@ from app.models.identity import Organization
 from app.models.projects import Project
 from app.models.reports import Report, ReportFormat
 from app.models.scans import Scan, ScanStatus, ScanType
+from app.db.tenant_context import set_tenant_context
 
 
 def test_report_format_persists_db_valid_lowercase_values():
@@ -55,7 +56,7 @@ async def test_reports_cross_tenant_read_blocked(db_session):
     await db_session.flush()
 
     # Seed org A's chain under org A's tenant context (RLS WITH CHECK).
-    await db_session.execute(text(f"SET app.current_org_id = '{org_a.id}'"))
+    await set_tenant_context(db_session, org_a.id)
     project = Project(
         organization_id=org_a.id,
         name="RptApp",
@@ -87,7 +88,7 @@ async def test_reports_cross_tenant_read_blocked(db_session):
     await db_session.commit()
 
     # Org B cannot see the row — RLS blocks it.
-    await db_session.execute(text(f"SET app.current_org_id = '{org_b.id}'"))
+    await set_tenant_context(db_session, org_b.id)
     blocked = (
         await db_session.execute(
             text("SELECT id FROM reports WHERE id = :rid"), {"rid": report.id}
@@ -96,7 +97,7 @@ async def test_reports_cross_tenant_read_blocked(db_session):
     assert blocked is None, "org B read an org-A report row — RLS is not isolating"
 
     # Org A can see it.
-    await db_session.execute(text(f"SET app.current_org_id = '{org_a.id}'"))
+    await set_tenant_context(db_session, org_a.id)
     visible = (
         await db_session.execute(
             text("SELECT id FROM reports WHERE id = :rid"), {"rid": report.id}
