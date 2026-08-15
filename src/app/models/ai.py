@@ -47,3 +47,12 @@ class AIAPICall(Base, TimestampMixin, TenantMixin):
     tokens_in: Mapped[int] = mapped_column(Integer, nullable=False)
     tokens_out: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    # NULL = the call succeeded. Non-NULL = it failed, and this is the reason
+    # (provider error type where available, else the exception class name).
+    #
+    # Without this a failed call is indistinguishable from a cheap one: the
+    # failure path logs tokens=0 and cost=0, so a 100%-degraded pipeline shows
+    # up in cost metrics as free. That is how 34 hours of every-fix-is-a-
+    # placeholder went unnoticed — the spend graph looked healthy because
+    # nothing was being spent.
+    error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)

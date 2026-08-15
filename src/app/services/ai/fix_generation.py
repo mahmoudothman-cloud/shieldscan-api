@@ -197,6 +197,19 @@ def _fallback_fix_template(vuln: Vulnerability) -> str:
     )
 
 
+def _use_fallback(vuln: Vulnerability) -> str:
+    """Assign the fallback template AND mark the vulnerability as fallen back.
+
+    One helper so the two can never drift: a fix_text without the flag is
+    exactly the state that forced audits to match on
+    ``ai_fix_text LIKE '%temporarily unavailable%'``.
+    """
+    fix_text = _fallback_fix_template(vuln)
+    vuln.ai_fix_text = fix_text
+    vuln.ai_fix_is_fallback = True
+    return fix_text
+
+
 def _compute_cost_from_usage(tokens_in: int, tokens_out: int) -> Decimal:
     """Sonnet cost from token usage (Q5): $3/1M in + $15/1M out."""
     return (
@@ -205,13 +218,53 @@ def _compute_cost_from_usage(tokens_in: int, tokens_out: int) -> Decimal:
     )
 
 
+def is_retryable(exc: Exception) -> bool:
+    """True when retrying ``exc`` could plausibly succeed.
+
+    Retry 429 (rate limit) and 5xx (provider-side); fail fast on every other
+    4xx. A 400 ``invalid_request_error`` — a bad request, an unknown model, or
+    an exhausted credit balance — will return exactly the same error on every
+    attempt.
+
+    This is not a micro-optimisation. During a 34-hour credit outage the
+    uniform-retry policy sent 3 attempts × 10 calls = 30 doomed requests per
+    scan, turning a single unambiguous billing error into 30 identical
+    failures and three times the latency before the fallback appeared.
+
+    Connection/timeout errors carry no status and ARE retried — those are the
+    transient case retries exist for.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        return True  # network/timeout/unknown — the genuinely transient case
+    if status == 429 or status >= 500:
+        return True
+    return False
+
+
+def describe_error(exc: Exception) -> str:
+    """Short, stable label for an AI call failure (stored in ai_api_calls).
+
+    Prefers the provider's own error type (e.g. ``invalid_request_error``) so
+    a billing exhaustion is distinguishable from a bad model id; falls back to
+    the exception class name.
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("type"):
+            return str(err["type"])[:100]
+    return type(exc).__name__[:100]
+
+
 async def _call_claude_with_retry(
     *, system: str, user_prompt: str, max_tokens: int
 ) -> anthropic.types.Message:
-    """Q8 A.b: call Claude with 3-attempt exponential backoff (1s/2s/4s).
+    """Q8 A.b: call Claude with up to 3 attempts, backing off 1s/2s/4s.
 
-    anthropic.APIError and any other exception are treated uniformly; the last
-    exception propagates once the attempts are exhausted.
+    Only retryable failures are retried (see ``is_retryable``); a
+    non-retryable one propagates immediately. The last exception propagates
+    once attempts are exhausted.
     """
     client = get_anthropic_client()
     last_exc: Exception | None = None
@@ -223,8 +276,17 @@ async def _call_claude_with_retry(
                 system=system,
                 messages=[{"role": "user", "content": user_prompt}],
             )
-        except Exception as exc:  # noqa: BLE001 — retry uniformly, re-raise last
+        except Exception as exc:  # noqa: BLE001 — classified below, re-raised
             last_exc = exc
+            if not is_retryable(exc):
+                logger.error(
+                    "ai call failed with a non-retryable error; not retrying: "
+                    "%s status=%s type=%s",
+                    type(exc).__name__,
+                    getattr(exc, "status_code", "n/a"),
+                    describe_error(exc),
+                )
+                raise
             if attempt < RETRY_MAX_ATTEMPTS - 1:
                 await asyncio.sleep(RETRY_BACKOFF_SECONDS[attempt])
     assert last_exc is not None
@@ -261,9 +323,7 @@ async def generate_fix(
             vulnerability.id,
         )
         scan.ai_pipeline_degraded = True
-        fix_text = _fallback_fix_template(vulnerability)
-        vulnerability.ai_fix_text = fix_text
-        return fix_text
+        return _use_fallback(vulnerability)
 
     target_context = _build_target_context(vulnerability, raw_finding)
     evidence = _format_evidence(vulnerability, raw_finding)
@@ -282,11 +342,19 @@ async def generate_fix(
             user_prompt=user_prompt,
             max_tokens=FIX_GEN_MAX_TOKENS,
         )
-    except Exception:  # noqa: BLE001 — retry-exhausted: degrade, don't propagate
-        logger.warning(
-            "fix-gen: Claude call failed for vuln %s after %d attempts; fallback",
+    except Exception as exc:  # noqa: BLE001 — degrade, don't propagate
+        # Log the CAUSE, at error. Falling back is correct behaviour; discarding
+        # why is not — a one-line warning summary is what let a 34-hour credit
+        # outage look like ordinary degradation. exc_info carries the traceback
+        # for anything the type/status/detail triple doesn't explain.
+        logger.error(
+            "fix-gen: Claude call failed for vuln %s; serving fallback. "
+            "%s status=%s detail=%s",
             vulnerability.id,
-            RETRY_MAX_ATTEMPTS,
+            type(exc).__name__,
+            getattr(exc, "status_code", "n/a"),
+            describe_error(exc),
+            exc_info=exc,
         )
         await log_ai_call(
             db=db,
@@ -298,11 +366,10 @@ async def generate_fix(
             tokens_in=0,
             tokens_out=0,
             cost_usd=Decimal("0"),
+            error_type=describe_error(exc),
         )
         scan.ai_pipeline_degraded = True
-        fix_text = _fallback_fix_template(vulnerability)
-        vulnerability.ai_fix_text = fix_text
-        return fix_text
+        return _use_fallback(vulnerability)
 
     tokens_in = message.usage.input_tokens
     tokens_out = message.usage.output_tokens
@@ -319,6 +386,7 @@ async def generate_fix(
     )
     fix_text = message.content[0].text
     vulnerability.ai_fix_text = fix_text
+    vulnerability.ai_fix_is_fallback = False
     return fix_text
 
 

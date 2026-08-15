@@ -5,6 +5,7 @@ from enum import Enum as PyEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
@@ -100,6 +102,17 @@ class Vulnerability(Base, TimestampMixin, TenantMixin):
 
     # AI enrichment (spec §8.5)
     ai_fix_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # True when ai_fix_text holds the deterministic fallback template rather
+    # than model-generated remediation.
+    #
+    # Explicit rather than inferred: auditing used to mean matching
+    # ai_fix_text LIKE '%temporarily unavailable%', which silently breaks the
+    # moment the template wording changes and cannot distinguish a
+    # budget-exhaustion fallback from an API-failure one. Scan.ai_pipeline_
+    # degraded covers the scan level; this is the per-vulnerability equivalent.
+    ai_fix_is_fallback: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
 
     # Cross-layer corroboration (spec §8.3)
     corroborated_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

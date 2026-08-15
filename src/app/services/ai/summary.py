@@ -28,6 +28,7 @@ from app.services.ai.cost_tracking import (
     log_ai_call,
 )
 from app.services.ai.fix_generation import (
+    describe_error,
     _call_claude_with_retry,
     _compute_cost_from_usage,
 )
@@ -243,8 +244,18 @@ async def _generate_executive_summary(*, db: AsyncSession, scan_id: UUID) -> Non
             user_prompt=user_prompt,
             max_tokens=SUMMARY_MAX_TOKENS,
         )
-    except Exception:  # noqa: BLE001 — retry-exhausted: degrade, don't propagate
-        logger.warning("summary: Claude call failed for scan %s; fallback", scan_id)
+    except Exception as exc:  # noqa: BLE001 — degrade, don't propagate
+        # Same posture as fix-gen: the fallback is correct, discarding the cause
+        # is not. error not warning, with the provider's own error type.
+        logger.error(
+            "summary: Claude call failed for scan %s; serving fallback. "
+            "%s status=%s detail=%s",
+            scan_id,
+            type(exc).__name__,
+            getattr(exc, "status_code", "n/a"),
+            describe_error(exc),
+            exc_info=exc,
+        )
         await log_ai_call(
             db=db,
             organization_id=scan.organization_id,
@@ -255,6 +266,7 @@ async def _generate_executive_summary(*, db: AsyncSession, scan_id: UUID) -> Non
             tokens_in=0,
             tokens_out=0,
             cost_usd=Decimal("0"),
+            error_type=describe_error(exc),
         )
         scan.executive_summary = _deterministic_fallback_summary(vulnerabilities)
         scan.ai_pipeline_degraded = True

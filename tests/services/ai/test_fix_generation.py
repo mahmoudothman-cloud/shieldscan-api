@@ -24,6 +24,9 @@ from app.services.ai.fix_generation import (
     _fallback_fix_template,
     _format_evidence,
     _generate_fixes,
+    describe_error,
+    is_retryable,
+    RETRY_MAX_ATTEMPTS,
     generate_fix,
 )
 from app.services.ai import fix_generation as fixgen_mod
@@ -39,6 +42,10 @@ _FIX_TEXT = "## Explanation\nx\n## Fix Code\ny\n## Remediation Steps\n1. z"
 
 async def _no_sleep(_delay):
     return None
+
+
+async def _always_over_budget(**kwargs):
+    return False
 
 
 # ------------------------------------------------------------ context dispatch
@@ -353,3 +360,143 @@ async def test_generate_fixes_info_fix_text_stays_null_not_fallback_template(
 
     assert info.ai_fix_text is None
     assert scan.ai_pipeline_degraded is False  # an exclusion is not a degradation
+
+
+# ------------------------------------------- retry classification + failure visibility
+
+
+class _StatusError(Exception):
+    """Stand-in for an anthropic APIError carrying a status + body."""
+
+    def __init__(self, status_code, error_type="invalid_request_error"):
+        super().__init__(f"error {status_code}")
+        self.status_code = status_code
+        self.body = {"error": {"type": error_type}}
+
+
+@pytest.mark.parametrize(
+    "status,retryable",
+    [
+        (429, True),   # rate limited — retrying is the point
+        (500, True),   # provider-side
+        (503, True),
+        (400, False),  # invalid_request_error — credit exhaustion lives here
+        (401, False),  # bad key
+        (403, False),
+        (404, False),  # unknown model
+    ],
+)
+def test_is_retryable_classification(status, retryable):
+    assert is_retryable(_StatusError(status)) is retryable
+
+
+def test_is_retryable_treats_statusless_errors_as_transient():
+    """Connection/timeout errors carry no status — those ARE the retry case."""
+    assert is_retryable(ConnectionError("connection reset")) is True
+
+
+def test_describe_error_prefers_the_provider_error_type():
+    assert describe_error(_StatusError(400, "invalid_request_error")) == (
+        "invalid_request_error"
+    )
+    assert describe_error(ConnectionError("boom")) == "ConnectionError"
+
+
+async def test_non_retryable_error_is_not_retried(db_session, monkeypatch):
+    """A 400 will never succeed; burning 3 attempts on it is pure latency.
+
+    During the 2026-08-14 credit outage the uniform-retry policy sent
+    3 attempts x 10 calls = 30 doomed requests per scan.
+    """
+    org, project, scan = await seed_org_project_scan(db_session)
+    vuln = await add_vulnerability(db_session, scan, org, project)
+    calls = {"n": 0}
+
+    async def _boom(*a, **k):
+        calls["n"] += 1
+        raise _StatusError(400)
+
+    client = install_anthropic(monkeypatch, [])
+    monkeypatch.setattr(client.messages, "create", _boom)
+    monkeypatch.setattr(fixgen_mod.asyncio, "sleep", _no_sleep)
+
+    await generate_fix(db=db_session, vulnerability=vuln, raw_finding=None, scan=scan)
+
+    assert calls["n"] == 1, "a non-retryable error must not be retried"
+    assert vuln.ai_fix_is_fallback is True
+
+
+async def test_retryable_error_still_retries(db_session, monkeypatch):
+    org, project, scan = await seed_org_project_scan(db_session)
+    vuln = await add_vulnerability(db_session, scan, org, project)
+    calls = {"n": 0}
+
+    async def _boom(*a, **k):
+        calls["n"] += 1
+        raise _StatusError(429, "rate_limit_error")
+
+    client = install_anthropic(monkeypatch, [])
+    monkeypatch.setattr(client.messages, "create", _boom)
+    monkeypatch.setattr(fixgen_mod.asyncio, "sleep", _no_sleep)
+
+    await generate_fix(db=db_session, vulnerability=vuln, raw_finding=None, scan=scan)
+
+    assert calls["n"] == RETRY_MAX_ATTEMPTS
+
+
+async def test_failed_call_is_distinguishable_from_a_cheap_one(db_session, monkeypatch):
+    """A failure must not look like a free success in ai_api_calls.
+
+    tokens=0 / cost=0 is what the failure path records, so without error_type a
+    fully-degraded pipeline reads as a cheap one in the cost metrics.
+    """
+    org, project, scan = await seed_org_project_scan(db_session)
+    vuln = await add_vulnerability(db_session, scan, org, project)
+
+    async def _boom(*a, **k):
+        raise _StatusError(400)
+
+    client = install_anthropic(monkeypatch, [])
+    monkeypatch.setattr(client.messages, "create", _boom)
+    monkeypatch.setattr(fixgen_mod.asyncio, "sleep", _no_sleep)
+
+    await generate_fix(db=db_session, vulnerability=vuln, raw_finding=None, scan=scan)
+
+    row = (
+        await db_session.execute(select(AIAPICall).where(AIAPICall.scan_id == scan.id))
+    ).scalars().one()
+    assert row.cost_usd == Decimal("0")
+    assert row.error_type == "invalid_request_error"
+
+
+async def test_fallback_is_flagged_not_inferred_from_text(db_session, monkeypatch):
+    """ai_fix_is_fallback replaces matching on the template wording."""
+    org, project, scan = await seed_org_project_scan(db_session)
+    vuln = await add_vulnerability(db_session, scan, org, project)
+
+    async def _boom(*a, **k):
+        raise _StatusError(500)
+
+    client = install_anthropic(monkeypatch, [])
+    monkeypatch.setattr(client.messages, "create", _boom)
+    monkeypatch.setattr(fixgen_mod.asyncio, "sleep", _no_sleep)
+
+    await generate_fix(db=db_session, vulnerability=vuln, raw_finding=None, scan=scan)
+    assert vuln.ai_fix_is_fallback is True
+
+    # A subsequent successful generation clears it.
+    vuln.ai_fix_text = None
+    client2 = install_anthropic(monkeypatch, [make_anthropic_response(_FIX_TEXT)])
+    assert client2 is not None
+    await generate_fix(db=db_session, vulnerability=vuln, raw_finding=None, scan=scan)
+    assert vuln.ai_fix_is_fallback is False
+
+
+async def test_budget_fallback_is_also_flagged(db_session, monkeypatch):
+    """The budget path and the API-failure path both mark the flag."""
+    org, project, scan = await seed_org_project_scan(db_session)
+    vuln = await add_vulnerability(db_session, scan, org, project)
+    monkeypatch.setattr(fixgen_mod, "check_budget", _always_over_budget)
+
+    await generate_fix(db=db_session, vulnerability=vuln, raw_finding=None, scan=scan)
+    assert vuln.ai_fix_is_fallback is True

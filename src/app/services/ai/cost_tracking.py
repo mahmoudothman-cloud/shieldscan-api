@@ -110,8 +110,14 @@ async def log_ai_call(
     tokens_in: int,
     tokens_out: int | None,
     cost_usd: Decimal,
+    error_type: str | None = None,
 ) -> AIAPICall:
     """Record one AI call (Q2 B.c post-call logging).
+
+    ``error_type`` is None for a successful call and carries the failure reason
+    otherwise. Without it a failed call (tokens 0, cost 0) is indistinguishable
+    from a cheap one, so a fully-degraded pipeline reads as free in the cost
+    metrics.
 
     Adds the row to the session and returns it; the caller owns the
     flush/commit (transaction boundary discipline, as with ``audit``).
@@ -125,6 +131,7 @@ async def log_ai_call(
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         cost_usd=cost_usd,
+        error_type=error_type,
     )
     db.add(call)
     return call

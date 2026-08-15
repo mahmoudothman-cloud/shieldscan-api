@@ -9,6 +9,32 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-08-15 — Drift #67: Anthropic credit exhaustion degraded 9 scans to placeholder fixes for 34 hours, undetected — Cumulative Drift Count 66 → 67
+
+**The drift.** The Anthropic account's credit balance ran out at **2026-08-14 ~01:18Z**. Every `fix_generation` and `executive_summary` call has returned `400 invalid_request_error` ("Your credit balance is too low") since. The pipeline behaved correctly — it fell back to `_fallback_fix_template` and set `Scan.ai_pipeline_degraded` every time — but **nothing surfaced it for 34 hours across 9 scans**. Diagnosed only because a log dump pasted during an unrelated investigation happened to show 9 `fix-gen: ... fallback` lines plus 1 `summary: ... fallback`.
+
+**Blast radius (audited).** 134 placeholder / 219 real / 185 NULL (INFO, correctly excluded) across 538 vulnerabilities. Scan `c1f8e490` (Aug 14 01:04) caught the balance crossing zero mid-run: **8 placeholder / 28 real**. Every scan after it is 100% placeholder — `aa329fb2` (39), `62a4cb22` (2), `87c13e8c` (11), `a8406909` (10), `92b48b50` (9), `46212b17` (9), `d6bfd80a` (9), `27b6b561` (11), `91ca9d3f` (9). **Reports: no PDF was generated during the outage** (newest is Aug 10), so no persisted customer artifact embeds these. `9ed6a1ab` (Aug 4) does contain 9 placeholders, from the *budget-cap* era — see below. JSON/SARIF render on demand and are never stored, so a download during the outage would carry placeholders with no record.
+
+**Why it stayed invisible — four separate failures, none of them the fallback itself.**
+
+1. **The cause was discarded.** `generate_fix` caught broad `Exception` and logged one `warning` summary line naming neither the exception type nor the status. The API returned an unambiguous, fully-diagnostic billing error on every call and the code threw it away. The fallback is correct behaviour; discarding *why* is not.
+2. **`ai_pipeline_degraded` was correct and unread.** The flag was `true` on all 9 scans the whole time. The signal existed; nothing consumed it. Verification instead used `ai_fix_text IS NOT NULL`, which `_fallback_fix_template` also satisfies — so the check could not distinguish a real fix from the placeholder and reported 9/9 healthy.
+3. **Cost metrics read a broken pipeline as a cheap one.** The failure path logs `tokens_in=0, tokens_out=0, cost_usd=0`. A 100%-degraded pipeline is therefore indistinguishable from an inexpensive one; the spend graph looked *healthier* precisely because nothing was working.
+4. **Every failure was retried three times.** `_call_claude_with_retry` treated all exceptions uniformly, so a 400 that can never succeed burned 3 attempts × 10 calls = **30 doomed requests per scan**, tripling latency before the fallback appeared.
+
+**One template, two causes — why text-matching was the wrong audit tool.** The audit above had to match `ai_fix_text LIKE '%temporarily unavailable%'`. That predicate breaks silently if the template wording ever changes, and it cannot separate the two distinct causes that emit it: **budget exhaustion** (`check_budget` refusing the call — scans `a70e1711` Aug 4 and `bada2318` Aug 2, before `9ef8027` raised the caps) and **API failure** (this outage). Both look identical in the column.
+
+**Fix (`e4b8c2a71f36` + code).** Log the cause at **error** with exception type, status, provider error type and `exc_info`, in both `fix_generation` and `summary`. Classify retries — retry 429 and 5xx, fail fast on other 4xx, keep retrying status-less connection/timeout errors. Add **`ai_api_calls.error_type`** (NULL = success; otherwise the provider's error type) so a failed call is not shaped like a free one. Add **`vulnerabilities.ai_fix_is_fallback`**, set by a single `_use_fallback()` helper that writes text and flag together so they cannot drift, used by *both* fallback paths and cleared on success — the per-vulnerability counterpart to the scan-level `ai_pipeline_degraded`.
+
+**Not backfilled, deliberately.** `ai_fix_is_fallback` defaults to `false`, so the 134 historical placeholders read as non-fallback. Backfilling by text match would bake the exact fragile predicate the column exists to replace into a permanent migration, and the historical answer is recorded in this entry. Rows written from now on are accurate.
+
+**Root-cause class.** Not a code defect — a billing state. What *was* defective is that four independent observability layers each failed to distinguish "working" from "degraded". This is the session's recurring shape: a check that passes for a reason unrelated to the thing it claims to verify.
+
+**Counters.** Cumulative drift count **66 → 67**. Forward-pinned, not done here: the Claude model string + hardcoded Sonnet pricing constants + `ESTIMATED_FIX_COST_USD` + the anthropic SDK pin, which must move together or cost tracking silently reports wrong numbers.
+
+Cross-references: `e4b8c2a71f36` (migration); `src/app/services/ai/fix_generation.py`, `summary.py`, `cost_tracking.py`; `9ef8027` (the earlier budget-cap raise whose fallbacks share the template); ADR-032 (M9.C fix generation).
+
+
 ### 2026-07-31 — M10.D Sub-Milestone CLOSED + M10 REPORT ARCHITECTURE MILESTONE ENTIRELY CLOSED (4 of 4) — Cumulative Drift Count Preserved at 66
 
 Closure entry for the fourth + final M10 sub-milestone (Task 10.6) **and** the milestone-level M10 closure. **Not a drift entry — no Drift #67**: M10.D landed **0 catalogued drifts**, and M10 as a whole landed 0 across all four sub-milestones. Structural precedent: the M10.C closure entry `08aa94a` (a closure summary, not a catalogue increment).
