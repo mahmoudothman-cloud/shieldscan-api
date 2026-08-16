@@ -64,6 +64,23 @@ RLS:
   is an ordinary function call and takes a real bind parameter — so the
   statement is parameterized in fact rather than in description.
 
+Job-completion logging:
+  ``_persist`` emits one ``job_completed`` line at INFO per job, after
+  commit, for every terminal outcome — including failed and canceled,
+  which are the outcomes most worth having in the log. It carries
+  engine, status, finding_count, persisted_count, duration_ms, scan_id,
+  job_id and idempotency_key, both in the message and in ``extra`` for a
+  structured handler to pick up. ``error_message`` is appended when the
+  event carries one — note that this handler has never persisted it to
+  ``scan_jobs.error_message`` (NULL for every row in production), so the
+  log line is the only place a failed job's reason survives.
+
+  finding_count vs persisted_count is the reason the line exists:
+  the first is the engine's claim, the second is what survived
+  validation into ``raw_findings``. Divergence is silent finding loss
+  and was previously invisible without a query. Pinned by
+  ``test_completions_consumer_logging.py``.
+
 Lifecycle:
   ``CompletionsConsumer.start()`` spawns the consume loop as an
   asyncio task. ``stop()`` cancels and waits for it to drain. Wired
@@ -111,6 +128,12 @@ logger = logging.getLogger(__name__)
 _TERMINAL_JOB_STATUSES: frozenset[str] = frozenset(
     {"completed", "failed", "canceled"}
 )
+# How many rejected findings get a full per-finding WARNING before the
+# loop falls back to the aggregate count alone. A schema mismatch rejects
+# every finding in a batch identically, so the first few carry all the
+# diagnostic value and the rest is repetition.
+_MAX_REJECTION_DETAILS = 3
+
 # Note: "partial" (a terminal status per ADR-017 sequencing) is NOT
 # in this set. Adding it would extend multi-process short-circuit
 # coverage to partial events but would also require updating
@@ -696,6 +719,76 @@ class CompletionsConsumer:
 
             await db.commit()
 
+            # One structured line per job, on every terminal outcome —
+            # completed, partial, failed, canceled. Emitted AFTER commit so
+            # it describes persisted state, not intent.
+            #
+            # persisted_count next to finding_count is the point of the line,
+            # not decoration. finding_count is what the engine asserts it
+            # found; persisted_count is how many rows survived
+            # _build_finding_dicts validation and landed in raw_findings.
+            # Those two diverging is silent data loss — it is how nmap
+            # produced zero findings for 14 consecutive runs while every
+            # status field read "completed". On one line, the divergence is
+            # visible in the log without anyone thinking to run a query.
+            #
+            # engine / idempotency_key prefer the event but fall back to the
+            # ScanJob row: both are `omitempty` on the Go side
+            # (events.JobCompletedEvent), so an event can legitimately omit
+            # them while the row always has them.
+            #
+            # error_message has no fallback because there is nothing to fall
+            # back TO. The engine sends it on failed events, but this handler
+            # has never written it to scan_jobs.error_message — that column is
+            # NULL for all 198 rows in production, including all 7 failed and
+            # canceled ones. The event is the only carrier, and it is
+            # discarded once handled, so this line is the only place the text
+            # survives. (Persisting it to the column is a separate change.)
+            error_message = event.get("error_message") or None
+            log_fields = {
+                "event": "job_completed",
+                "engine": event.get("engine") or job.engine,
+                "status": new_status,
+                "finding_count": finding_count,
+                "persisted_count": len(finding_dicts),
+                "duration_ms": duration_ms,
+                "scan_id": str(job.scan_id),
+                "job_id": str(job_id),
+                "idempotency_key": (
+                    event.get("idempotency_key") or job.idempotency_key
+                ),
+                # Always in `extra`, even when None, so a structured handler
+                # sees one stable field set rather than a shape that varies
+                # by outcome.
+                "error_message": error_message,
+            }
+            # %s throughout, never %d: finding_count / duration_ms come
+            # straight off the wire and a non-numeric value would make the
+            # formatting itself the failure.
+            message = (
+                "job_completed engine=%s status=%s finding_count=%s "
+                "persisted_count=%s duration_ms=%s scan_id=%s job_id=%s "
+                "idempotency_key=%s"
+            )
+            args = [
+                log_fields["engine"],
+                log_fields["status"],
+                log_fields["finding_count"],
+                log_fields["persisted_count"],
+                log_fields["duration_ms"],
+                log_fields["scan_id"],
+                log_fields["job_id"],
+                log_fields["idempotency_key"],
+            ]
+            if error_message is not None:
+                # Rendered only when present, and last: it is free text of
+                # unbounded length, so trailing it keeps the fixed key=value
+                # fields in a stable, greppable position. %r quotes it, so
+                # embedded spaces and newlines can't fake a field boundary.
+                message += " error_message=%r"
+                args.append(error_message)
+            logger.info(message, *args, extra=log_fields)
+
         if ai_dispatch_scan_id is not None:
             await self._trigger_ai_pipeline_dispatch(
                 ai_dispatch_scan_id, org_uuid
@@ -721,8 +814,16 @@ class CompletionsConsumer:
         independently; a ``ValidationError`` on one finding is logged and
         skipped rather than propagated. Previously a single malformed
         finding aborted the whole engine's batch at insert time (one bad
-        zap event discarded all 608 findings). Rejected counts are logged
-        after the loop.
+        zap event discarded all 608 findings).
+
+        **Rejection logging.** The first ``_MAX_REJECTION_DETAILS`` failures
+        log in full at WARNING (which validator, which field, which tool);
+        the loop then emits one aggregate at ERROR with the counts, flagging
+        the total-loss case explicitly. Both levels were raised from
+        debug/warning: the per-finding reason sat at DEBUG and so produced
+        no output at all, which is a large part of why the nmap and
+        tool_metadata diagnoses were reconstructions from the database
+        rather than reads of a log (DRIFT-LOG #68).
 
         Empty input returns ``[]`` so caller's status-only path remains
         cheap.
@@ -741,10 +842,24 @@ class CompletionsConsumer:
                 rejected += 1
                 if isinstance(raw, dict):
                     reject_tools.add(str(raw.get("tool_name", "unknown")))
-                logger.debug(
-                    "raw finding rejected by RawFindingCreate validation: %s",
-                    exc,
-                )
+                # First few in full detail at WARNING, not DEBUG. This was
+                # the only place that said WHY a finding was dropped, and at
+                # debug it never produced a single line of output in the
+                # process's life — the API has no logging configuration, so
+                # debug and info both went nowhere (see DRIFT-LOG #68).
+                # Capped rather than uncapped: a schema mismatch rejects
+                # every finding in the batch, and 642 identical tracebacks
+                # would bury the aggregate below.
+                if rejected <= _MAX_REJECTION_DETAILS:
+                    logger.warning(
+                        "raw finding rejected by RawFindingCreate validation "
+                        "(%d of at most %d shown; tool=%s): %s",
+                        rejected,
+                        _MAX_REJECTION_DETAILS,
+                        (raw.get("tool_name", "unknown")
+                         if isinstance(raw, dict) else "unknown"),
+                        exc,
+                    )
                 continue
             # by_alias=False → Python field names (mobile_permission,
             # mobile_component_name, tool_metadata); by_alias=True would
@@ -759,10 +874,16 @@ class CompletionsConsumer:
             d.pop("org_id", None)
             dicts.append(d)
         if rejected:
-            logger.warning(
-                "raw findings rejected during ingest: %d of %d (tool=%s)",
+            # ERROR, not WARNING: findings reaching the consumer and failing
+            # validation is data loss from a cross-repo schema mismatch, not
+            # a degraded-but-working condition. Total loss (rejected ==
+            # total) is called out explicitly — that is the nmap shape,
+            # where the job reports success and persists nothing.
+            logger.error(
+                "raw findings rejected during ingest: %d of %d%s (tool=%s)",
                 rejected,
                 total,
+                " — ENTIRE BATCH LOST" if rejected == total else "",
                 ",".join(sorted(reject_tools)) or "unknown",
             )
         return dicts

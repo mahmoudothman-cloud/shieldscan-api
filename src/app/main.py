@@ -28,6 +28,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.db import AsyncSessionLocal
+from app.logging_config import configure_logging
 from app.redis_client import close_redis, get_redis, init_redis
 from app.routes import api_keys as api_keys_routes
 from app.routes import auth as auth_routes
@@ -50,6 +51,15 @@ _PROBE_TIMEOUT = 0.5
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Root logging FIRST — before anything that might log. Uvicorn's default
+    # config attaches handlers to its own three loggers and defines no root
+    # entry, so without this every app-level INFO is discarded and warnings
+    # reach stderr through logging.lastResort with no timestamp or logger
+    # name. See app/logging_config.py. Runs after uvicorn's own dictConfig
+    # (uvicorn configures logging before importing the app), so our root
+    # handler is not overwritten.
+    configure_logging()
+
     # Initialize Redis + verify reachability — fail closed (RUNBOOK §11.6).
     redis = await init_redis()
     try:

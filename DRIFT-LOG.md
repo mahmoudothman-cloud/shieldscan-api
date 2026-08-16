@@ -9,6 +9,45 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-08-16 — Drift #68: The API never had a logging configuration — every `info` line discarded, every `warning`/`error` unattributable, for the life of the project — Cumulative Drift Count 67 → 68
+
+**The drift.** `shieldscan-api` has never configured logging. There is no `basicConfig`, no `dictConfig`, no `--log-config` on the uvicorn launch. Uvicorn's default `LOGGING_CONFIG` attaches handlers to exactly three loggers — `uvicorn`, `uvicorn.error`, `uvicorn.access` — and defines **no `root` entry**. Every `app.*` logger therefore had no handler anywhere on its propagation chain. Consequences, in force since M1:
+
+1. **`logger.info` and `logger.debug` produced no output at all.** All 15 `info` and 2 `debug` call sites in `src/` have been dead since they were written. Not throttled, not filtered — never emitted.
+2. **`warning` / `error` / `exception` were emitted only by `logging.lastResort`**, the stdlib's WARNING-level fallback. That handler prints the bare message to stderr with **no timestamp, no level, no logger name**, and honours no formatter. Every API log line in the project's history is unattributable to a module or a point in time.
+
+**Evidence, not inference.** Applying uvicorn's own `LOGGING_CONFIG` and then logging INFO and WARNING through an `app.services.*` logger emits the WARNING and drops the INFO — reproduced in a subprocess and pinned by `tests/test_logging_config.py`. Independent corroboration from this project's own artifacts: `/tmp/api.log` during the #67 outage contains
+
+```
+fix-gen: Claude call failed for vuln 935d28de-…; fallback
+```
+
+with no timestamp, no level and no logger name — the visual signature of `lastResort` output, sitting directly beneath uvicorn's own properly-formatted `INFO:` lines for contrast.
+
+**Relationship to #67.** #67 is the incident that exposed this; it is not the same defect. #67 was scoped to the AI pipeline: a billing state plus four observability layers that could not distinguish working from degraded. **This entry is wider and older** — it is the substrate all of those layers were logging *into*. #67's failure 1 ("the cause was discarded") describes code that threw away the exception detail; this entry describes the fact that even a perfect log line would have gone nowhere if written at `info`, and would have printed without timestamp or origin if written at `warning`.
+
+**Why the earlier diagnoses were as hard as they were.** The nmap silent-loss investigation (14 consecutive runs reporting success and persisting nothing) and the `tool_metadata` investigation were both reconstructed from database queries, because the log could not answer them. Specifically, `_build_finding_dicts` logged the per-finding rejection reason — *which validator, which field, which tool* — at **`logger.debug`**. That is the single line that would have named the cause in both investigations, and it has never produced output at any level in the process's life. The aggregate sat at `warning`, so it reached `lastResort` as a bare, timeless string.
+
+**Fix.** New `src/app/logging_config.py`: one `StreamHandler` on root, formatter carrying timestamp / level / logger name / message, level from a new `LOG_LEVEL` setting (default `INFO`), called from the FastAPI lifespan before anything can log. Idempotent, so a repeat call replaces its handler rather than doubling every line. Uvicorn's own records are unaffected — `uvicorn` and `uvicorn.access` set `propagate=False` and `uvicorn.error` propagates only to its `uvicorn` parent, so nothing double-emits (asserted, not assumed). Back-out is deleting one call in `main.py`.
+
+Rejection logging raised in the same change: per-finding detail `debug → warning` (capped at the first 3, since a schema mismatch rejects every finding in a batch identically), aggregate `warning → error` with the total-loss case — `rejected == total`, the nmap shape — called out explicitly on the line.
+
+**Volume verified empirically before trusting INFO as the default.** A root handler at INFO unmasks third-party loggers, so this was measured rather than estimated:
+
+- **SQLAlchemy is not unmasked.** `sqlalchemy/log.py` sets its own root logger to `WARNING` at import when unset, so `root=INFO` does **not** enable statement echo. 11 real statements → **0 records**. This was the one library that could have produced thousands of lines per scan.
+- **Redis: 0 records** across 25 pub/sub messages round-tripped on the consumer's actual transport path plus 10 pings. `from_url` negotiates **RESP2**, so `_parsers/resp3.py`'s per-message `"Push response:"` INFO line — the one library site that would scale with scan size — is not on the path.
+- **Qdrant: 0** across 5 calls (its only `logging.info` sites are in `parallel_processor.py`, the bulk-upload workers, which we do not use). **asyncpg: 0** INFO sites. **httpcore: 0** INFO sites. **urllib3:** redirects only. **asyncio:** all 10 sites debug-mode-gated or exceptional; measured 0. **httpx** is pinned to WARNING in `logging_config.py` (it logs one line per outbound request, which would narrate every AI call).
+- **anthropic / openai:** 2 INFO sites each, both `"Retrying request to %s in %f seconds"` — SDK-internal retry only, zero on success. Worth noting for #67: these would have been a genuine library-level signal during a *retryable* outage, but the credit failure was a `400`, which the SDK does not retry, so even that line would not have appeared.
+
+Composed against real scan `cf4a8504` (7 jobs, 642 raw findings, 34 vulnerabilities, 18 AI calls, 0 errors): **~9 app INFO lines per scan** — 7 `job_completed` (one per job) plus 2 pipeline lines — with **0 library lines**, against 4 process-lifetime start/stop lines and 2 per SSE client session. The signal is not buried. End-to-end confirmation is deferred to the first API restart carrying this change, since the process that produced the numbers above predates it.
+
+**Forward-pin, found while writing the failure line, not fixed here.** `scan_jobs.error_message` **has never been populated**: 198 rows, 7 of them `failed`/`canceled`, **0 non-NULL**. The Go worker sends `error_message` on failed `job_completed` events and `_persist` writes `status`, `finding_count` and `duration_ms` while discarding it. The new log line is therefore the *only* place a failed job's reason survives at all. Persisting it to the column is a separate change.
+
+**Root-cause class.** The #67 class was "a check that passes for a reason unrelated to what it claims to verify". This one is its complement: **a signal written correctly and delivered nowhere**. Every `logger.info` in this codebase was, until now, a comment with runtime cost.
+
+Cross-references: Drift #67 (the incident that exposed this); `src/app/logging_config.py`, `src/app/main.py` (lifespan call), `src/app/config.py` (`LOG_LEVEL`); `tests/test_logging_config.py` (forcing function — fails if uvicorn ever ships a `root` entry, at which point the module should be deleted rather than left as ceremony); `src/app/services/completions_consumer.py` (`job_completed` line + rejection levels); `tests/services/test_completions_consumer_logging.py`.
+
+
 ### 2026-08-15 — Drift #67: Anthropic credit exhaustion degraded 9 scans to placeholder fixes for 34 hours, undetected — Cumulative Drift Count 66 → 67
 
 **The drift.** The Anthropic account's credit balance ran out at **2026-08-14 ~01:18Z**. Every `fix_generation` and `executive_summary` call has returned `400 invalid_request_error` ("Your credit balance is too low") since. The pipeline behaved correctly — it fell back to `_fallback_fix_template` and set `Scan.ai_pipeline_degraded` every time — but **nothing surfaced it for 34 hours across 9 scans**. Diagnosed only because a log dump pasted during an unrelated investigation happened to show 9 `fix-gen: ... fallback` lines plus 1 `summary: ... fallback`.

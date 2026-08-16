@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     FERNET_KEY: str
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "https://app.shieldscan.io"]
     ENVIRONMENT: str = "development"
+    # Root log level for the API process, applied by app.logging_config.
+    # Until that module existed there was no logging configuration at all and
+    # uvicorn configures only its own loggers, so every app-level INFO line
+    # was discarded and warnings surfaced through logging.lastResort without
+    # timestamp or logger name. INFO is the useful default: src/ has 15 INFO
+    # call sites total.
+    LOG_LEVEL: str = "INFO"
     # Hard cap on a single mobile-upload (.apk / .ipa) body size, in MB.
     # Enforced at the route handler before the body is read (via
     # Content-Length pre-check) and again after read for clients that
