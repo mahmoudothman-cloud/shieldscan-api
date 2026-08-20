@@ -30,7 +30,11 @@ Single-transaction discipline (DRIFT-LOG 2026-04-30 H.1):
   commits the entire transaction (Scan + ScanJobs + audit) atomically.
   If anything before the commit fails, the whole tx rolls back. After
   commit, "ghost queued" rows are the visible-failure mode if Redis
-  dispatch fails (M5+ retry janitor recovers — see ADR-013).
+  dispatch fails. No janitor recovers those — the "M5+ retry janitor"
+  this comment used to name was never built. What exists (2026-08-20)
+  is ``scripts/backfill_stranded_jobs.py``, which marks such rows
+  FAILED so the parent scan can aggregate; it does not re-dispatch
+  them. See engine Drift #70.
 
 Audit emission (DRIFT-LOG):
   This route does NOT emit its own audit row. The orchestrator emits

@@ -12,8 +12,12 @@ Commit-then-dispatch ordering (DRIFT-LOG 2026-04-30):
   Two failure modes; we preferred the visible-failure one.
 
   * If commit succeeds + queue.dispatch fails  → DB rows ('ghost
-    queued') visible to the customer; M5+ retry janitor recovers.
-    VISIBLE failure — easy to triage.
+    queued') visible to the customer. VISIBLE failure — easy to
+    triage, but NOT automatically recovered: the "M5+ retry janitor"
+    this comment named for four months was never built (engine Drift
+    #69). ``scripts/backfill_stranded_jobs.py`` (2026-08-20) marks
+    such rows FAILED so their scan can aggregate; re-dispatch is
+    still manual.
   * If commit fails (which it shouldn't past flush)              → no
     ghost rows because nothing committed.
 
@@ -436,9 +440,9 @@ class ScanOrchestrator:
         await self.db.commit()
 
         # 5. Build payloads + dispatch to Redis. If this fails AFTER
-        #    commit, we have ghost-queued DB rows; M5+ retry janitor
-        #    will surface and recover them. Visible failure > silent
-        #    failure (DRIFT-LOG H.3 entry).
+        #    commit, we have ghost-queued DB rows. Visible failure >
+        #    silent failure (DRIFT-LOG H.3 entry) — but nothing
+        #    re-dispatches them; see the module docstring.
         for job in jobs:
             payload = await self._build_job_payload(
                 scan, job, auth_payload, mobile_payload

@@ -9,6 +9,32 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-08-20 — API half of engine Drift #70: reclaimed jobs get a writer, and `scan_jobs.error_message` finally holds something — no catalogue increment
+
+**Not a drift entry.** The catalogue increment is engine-side (`shieldscan-engine/DRIFT-LOG.md` Drift #70, 69 → 70). This records what the api had to change for it, because three of the four changes are in files a reader would otherwise expect to be untouched.
+
+**Context in one line.** The engine used to destroy a job's payload the instant it was popped, so a worker death lost the job permanently; ADR-013 makes Python the sole writer, so no event meant no write and the row stayed `queued` forever. The engine now checks jobs out into a per-worker processing list and recovers them by publishing the terminal event the dead worker never sent.
+
+**1. `scan_jobs.error_message` is now persisted.** The column has existed since the first scans migration and was NULL for all 198 rows in production — including all 7 failed and canceled ones. It stops being cosmetic here: recovery's whole diagnostic payload is the reason string, and a log line is not queryable. Two lines in `_persist`, assigned only when the event carries a message so a re-delivered success can never blank a stored reason. **Closes `task_c7113785`.**
+
+**2. A terminal job can no longer be moved off its status.** `_persist`'s short-circuit used to require the incoming status to *match* the stored one, which was sufficient while every event came from the worker that ran the job. The reclaimer breaks that: it can lose a race with an acknowledgement and publish `failed` for a job that completed, and under the old rule that event would have overwritten a job whose findings were ingested and whose scan had aggregated. It now fires on any terminal status, and logs at WARNING when the statuses differ — the interesting case. Side effect, and the right one: job-level behaviour now matches the scan-level cancel-wins policy from Task 4.5 H.2.
+
+**3. `CompletionsConsumer.apply_event` — a public door onto `_handle`.** The backfill replays the events dead workers never sent. Making it go through the live routing/persistence/aggregation path, rather than reimplementing those writes, is what stops the two from drifting. Exceptions propagate, unlike the consume loop's `_handle_safely`: a backfill wants to know what failed.
+
+**4. `services/stranded_jobs.py` + `scripts/backfill_stranded_jobs.py`.** One-shot recovery for jobs stranded before the engine fix.
+
+The **ghost test** lives here and nowhere else: a job is stranded only if it is non-terminal in PostgreSQL AND its payload is absent from Redis — from the four priority queues *and* from every worker's processing list. Status alone would fail live work: a job legitimately waiting its turn also reads `queued`, and one a worker is running right now reads `queued` too, because nothing sets `running`. Missing the processing-list half is the dangerous direction — it would mark every actively running job stranded and fail it underneath a live worker.
+
+Two deliberate properties. The stranded set is **re-derived on every run**, never taken from a snapshot; a list captured during an investigation goes stale the moment a scan finishes. And the `error_message` is **distinct**, so these stay separable from genuine tool failures — without that the recovery would be indistinguishable from the thing it recovers from.
+
+**Why this is recovery and not tidying.** Fifteen stranded jobs block twelve parent scans from ever aggregating, and `_maybe_complete_scan` is what dispatches the AI pipeline. **1,422 raw findings** already collected and already paid for in compute have never been analysed, purely because a sibling job never reported. The cost of stranding was never a wrong status field; it was discarded work.
+
+**ADR-013 is intact, and says so explicitly now.** Nothing added here writes scan state outside the consumer. The engine's sweep reads only Redis and emits events. The backfill *does* compare Redis to PostgreSQL, which is one line away from the "periodic reconciliation jobs" anti-pattern in ADR-013 — so a scope note now records that it is deliberately one-shot, and that if it ever acquires a schedule the right response is to find out why jobs are still being stranded.
+
+Cross-references: `shieldscan-engine/DRIFT-LOG.md` Drift #70 (the catalogue entry) and Drift #69 (the defect); `src/app/services/stranded_jobs.py`, `scripts/backfill_stranded_jobs.py`, `src/app/services/completions_consumer.py`; `tests/services/test_stranded_jobs.py`; SPEC §7.1 checkout contract, §7.5 claim release, ADR-013 correction + scope note; Drift #68 (the `job_completed` line that now carries `error_message` to a column as well as a log).
+
+---
+
 ### 2026-08-16 — Drift #68: The API never had a logging configuration — every `info` line discarded, every `warning`/`error` unattributable, for the life of the project — Cumulative Drift Count 67 → 68
 
 **The drift.** `shieldscan-api` has never configured logging. There is no `basicConfig`, no `dictConfig`, no `--log-config` on the uvicorn launch. Uvicorn's default `LOGGING_CONFIG` attaches handlers to exactly three loggers — `uvicorn`, `uvicorn.error`, `uvicorn.access` — and defines **no `root` entry**. Every `app.*` logger therefore had no handler anywhere on its propagation chain. Consequences, in force since M1:

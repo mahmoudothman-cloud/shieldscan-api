@@ -71,9 +71,10 @@ Job-completion logging:
   engine, status, finding_count, persisted_count, duration_ms, scan_id,
   job_id and idempotency_key, both in the message and in ``extra`` for a
   structured handler to pick up. ``error_message`` is appended when the
-  event carries one — note that this handler has never persisted it to
-  ``scan_jobs.error_message`` (NULL for every row in production), so the
-  log line is the only place a failed job's reason survives.
+  event carries one, and is now also written to
+  ``scan_jobs.error_message`` — it was NULL for every row in production
+  until the job reclaimer (engine Drift #70) made the reason the whole
+  point of the event.
 
   finding_count vs persisted_count is the reason the line exists:
   the first is the engine's claim, the second is what survived
@@ -275,6 +276,21 @@ class CompletionsConsumer:
             )
 
     # ---------------------------------------------------------------- routing (unit-testable)
+
+    async def apply_event(self, event: dict) -> None:
+        """Apply one completion event directly, bypassing Pub/Sub.
+
+        The only caller is the stranded-job backfill
+        (``app.services.stranded_jobs``), which replays the events dead
+        workers never sent. It exists so that recovery goes through the
+        exact routing, persistence and scan-aggregation path a live event
+        takes, rather than a second implementation of the same writes
+        that could drift from it.
+
+        Exceptions propagate, unlike the consume loop's
+        ``_handle_safely``: a backfill wants to know what failed.
+        """
+        await self._handle(event)
 
     async def _handle(self, event: dict) -> None:
         """Route one completion event to the appropriate handler based
@@ -671,17 +687,39 @@ class CompletionsConsumer:
             # bounding N>1 worker damage. Short-circuit BEFORE bulk
             # insert so peer-worker-handled events don't leak stale
             # finding rows.
-            if (
-                job.status == new_status
-                and job.status in _TERMINAL_JOB_STATUSES
-            ):
-                logger.debug(
-                    "completion event for already-terminal job_id=%s "
-                    "(status=%s); peer process handled — skipping ingest "
-                    "+ status update",
-                    job_id,
-                    job.status,
-                )
+            #
+            # Terminal is terminal, whatever the incoming status says.
+            # This used to short-circuit only when the two statuses
+            # matched, which was enough while every event came from the
+            # worker that ran the job. The engine's job reclaimer
+            # (engine Drift #70) breaks that assumption: it publishes
+            # job_completed(status=failed) for jobs whose worker died,
+            # and it can lose a race with an acknowledgement. Under the
+            # old rule such an event would overwrite a job that had just
+            # completed — findings ingested, scan aggregated — with
+            # `failed`. Refusing to move a job off a terminal status
+            # makes that impossible by construction rather than by
+            # timing, and it aligns job-level behaviour with the
+            # scan-level cancel-wins policy (Task 4.5 H.2).
+            if job.status in _TERMINAL_JOB_STATUSES:
+                if job.status == new_status:
+                    logger.debug(
+                        "completion event for already-terminal job_id=%s "
+                        "(status=%s); peer process handled — skipping ingest "
+                        "+ status update",
+                        job_id,
+                        job.status,
+                    )
+                else:
+                    logger.warning(
+                        "completion event would change an already-terminal "
+                        "job_id=%s from status=%s to status=%s; ignored. A "
+                        "reclaimed job that finished after all, or two "
+                        "producers for one job.",
+                        job_id,
+                        job.status,
+                        new_status,
+                    )
                 return False
 
             # Bulk insert findings (if any). Per Phase-0 Deviation 1:
@@ -707,6 +745,16 @@ class CompletionsConsumer:
             job.finding_count = finding_count
             if duration_ms is not None:
                 job.duration_ms = duration_ms
+            # The column has existed since the first scans migration and
+            # was never written, so every failed job in production says
+            # only "failed". Persisting it here is what makes a reclaimed
+            # job distinguishable from a job the tool itself failed — the
+            # reclaimer's whole diagnostic value is in the reason string
+            # (engine Drift #70), and a log line is not queryable.
+            # Assigned only when the event carries one, so a re-delivered
+            # success can never blank a reason already stored.
+            if event.get("error_message"):
+                job.error_message = event["error_message"]
             await db.flush()
 
             # Aggregate scan-level state if all sibling jobs are now
@@ -738,12 +786,13 @@ class CompletionsConsumer:
             # them while the row always has them.
             #
             # error_message has no fallback because there is nothing to fall
-            # back TO. The engine sends it on failed events, but this handler
-            # has never written it to scan_jobs.error_message — that column is
-            # NULL for all 198 rows in production, including all 7 failed and
-            # canceled ones. The event is the only carrier, and it is
-            # discarded once handled, so this line is the only place the text
-            # survives. (Persisting it to the column is a separate change.)
+            # back TO: the event is the only carrier. It is now persisted to
+            # scan_jobs.error_message above — that column was NULL for all
+            # 198 rows in production, including all 7 failed and canceled
+            # ones, until the reclaimer made the reason load-bearing. The
+            # line still carries it because the log is where an operator
+            # looks first, and because it is the only record for events that
+            # short-circuit before the write.
             error_message = event.get("error_message") or None
             log_fields = {
                 "event": "job_completed",

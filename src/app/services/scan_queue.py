@@ -329,7 +329,9 @@ async def publish_cancel_signal(
     Fire-and-forget per visible-failure discipline (the scan is
     CANCELED in PG either way — durable state is the source of truth;
     a missed publish surfaces as a ghost-canceled scan if workers
-    are running, recoverable via M5+ janitor).
+    are running — the scan is CANCELED, the job keeps running to
+    completion. Nothing recovers that automatically; the "M5+ janitor"
+    once named here was never built. See engine Drift #70.
     """
     if logger is None:
         logger = logging.getLogger(__name__)
