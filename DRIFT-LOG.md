@@ -9,6 +9,34 @@ engine-specific entries, see `../shieldscan-engine/DRIFT-LOG.md`.
 
 ---
 
+### 2026-09-07 — API half of engine Drift #71: nikto is dispatched by nothing, and its historical findings are deleted — no catalogue increment
+
+**Not a drift entry.** The catalogue increment is engine-side (`shieldscan-engine/DRIFT-LOG.md` Drift #71, 70 → 71). This records the two api-side consequences.
+
+**Context in one line.** Nikto 2.1.5 cannot negotiate TLS, so against a target on port 443 it spoke plain HTTP, received nginx's `400 The plain HTTP request was sent to HTTPS port`, and reported that page's headers as findings — on every HTTPS scan, for the life of the deployment.
+
+**1. `nikto` removed from `SCAN_TYPE_TOOLS` for FULL_WEB, FULL_WEB_SOURCE and FULL_SPECTRUM.** The engine now refuses TLS targets outright, which is correct and deliberately loud: the job goes terminal as `job_completed(status=failed)` with the reason persisted to `scan_jobs.error_message`. Verified end to end — the first failure reason ever to survive that path.
+
+But `ai_pipeline_consumer` derives `PARTIAL` from any failed job, so leaving nikto in the dispatch table made every report read *"4 of 25 scan jobs failed; partial results available"*. That tells a customer their results degraded when the truth is a tool that could not contribute. The refusal was worth seeing once; it is not worth putting on every report.
+
+The engine preflight stays as the guard. **Re-adding nikto to this dict is part of the 2.5.0 upgrade** (`task_74dc91dd`) — without that step the new binary lands and nothing dispatches it, which is the same shape of silent nothing this whole arc is about. The dict carries a comment saying so.
+
+**2. `services/nikto_artifacts.py` + `scripts/cleanup_nikto_artifacts.py`** delete the historical rows: **46 raw_findings across 28 scans, and 37 vulnerabilities promoted solely from them.**
+
+**The scope is derived from the artifact, not from a date.** A row qualifies when its `target_url` is a plain-`http://` URL on port 443 — a state that cannot arise unless TLS negotiation failed. That test is self-limiting in both directions: a genuine plain-HTTP nikto scan on port 80 does not match, and neither will anything produced once nikto works. A timestamp cutoff would have had neither property and would have deleted real output.
+
+The claim that every historical row is an artifact was **checked, not assumed**: all 46 are on a `:443` plain-HTTP target, zero on any other port. And the artifacts are not merely uninformative — nikto reported *"The anti-clickjacking X-Frame-Options header is not present"* for `shieldscan.odyssey-eg.com`, which returns `x-frame-options: SAMEORIGIN`. It was describing the 400 page, which has no headers at all.
+
+**Mixed provenance blocks the run.** A `Vulnerability` cites every tool that corroborated it via `raw_finding_ids`, so one can be backed by both an artifact and real findings from zap or nuclei. Deleting it loses real data; stripping only the nikto ids leaves a promoted vulnerability whose score came from evidence that is now gone. Neither is obviously right, so the script identifies them, refuses to delete anything at all, and exits 2. **There are none in the current data** — the path exists in tests only, which is precisely why it has tests.
+
+**Raw `text()` was rejected by an existing guard, correctly.** The first version used `text()` SQL and tripped `test_no_text_statement_names_a_tenant_table`, whose docstring says it deliberately keeps no exceptions list because the tenant guard identifies tenant tables by ORM mapper and a `text()` statement has none. Deleting from `raw_findings` and `vulnerabilities` is exactly the access that must stay visible to it, so the module was rewritten in ORM constructs. The guard was right; it did its job.
+
+**Verification.** 10 tests. Eight mutations applied, seven caught. The eighth — dropping `RawFinding.id.is_not(None)` from the real-rows filter — **survived, and that is the correct result**: on an unmatched outer-join row every column is NULL, so the FILTER already excludes it via three-valued logic. The predicate states intent rather than enforcing it, and the comment now says so instead of claiming it prevents a mistake it cannot.
+
+Cross-references: `shieldscan-engine/DRIFT-LOG.md` Drift #71; `src/app/services/orchestrator.py` (`SCAN_TYPE_TOOLS`), `src/app/services/nikto_artifacts.py`, `scripts/cleanup_nikto_artifacts.py`, `tests/services/test_nikto_artifacts.py`; `tests/test_rls_invariants.py` (the guard that caught the first attempt); `task_74dc91dd` (the upgrade, which must re-add nikto to the dispatch table).
+
+---
+
 ### 2026-08-20 — API half of engine Drift #70: reclaimed jobs get a writer, and `scan_jobs.error_message` finally holds something — no catalogue increment
 
 **Not a drift entry.** The catalogue increment is engine-side (`shieldscan-engine/DRIFT-LOG.md` Drift #70, 69 → 70). This records what the api had to change for it, because three of the four changes are in files a reader would otherwise expect to be untouched.
