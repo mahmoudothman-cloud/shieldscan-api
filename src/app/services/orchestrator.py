@@ -104,31 +104,13 @@ class UnsupportedScanTypeError(ValueError):
 # and the direct dispatch set for non-web-ScanTypes. Drift #60
 # recon-orphan sub-category resolved structurally (subfinder + httpx
 # removed; no longer dispatch to an unregistered engine).
-# NIKTO IS NOT DISPATCHED (2026-09-07; engine Drift #71). The packaged
-# Nikto 2.1.5 cannot negotiate TLS: it speaks plain HTTP to port 443 and
-# parses the server's "400 Bad Request" page as the site, so every finding
-# it produced on an HTTPS target described that error page. The engine now
-# refuses TLS targets outright (internal/tools/nikto: Config.TLSCapable +
-# preflight), which is the correct guard and is deliberately loud — but
-# leaving nikto in this dict meant four refused jobs per scan, and
-# ai_pipeline_consumer derives PARTIAL from any failed job. Every report
-# then read "4 of 25 scan jobs failed; partial results available", telling
-# a customer their results degraded when the truth was a tool that was
-# never going to contribute.
-#
-# So nikto is dispatched by nothing until it can actually scan. The engine
-# preflight stays as the guard.
-#
-# RE-ADD IT as part of the Nikto 2.5.0 upgrade (task_74dc91dd) — the
-# upgrade is not complete until this dict dispatches it again, or the new
-# binary lands and nothing runs it.
 SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
     ScanType.QUICK: ("nuclei", "sslyze"),
     ScanType.FULL_WEB: (
         "nuclei",
         "zap",
         "wapiti",
-        # "nikto" — removed 2026-09-07, see the note above this dict.
+        "nikto",
         "nmap",
         "sslyze",
     ),
@@ -136,7 +118,7 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
         "nuclei",
         "zap",
         "wapiti",
-        # "nikto" — removed 2026-09-07, see the note above this dict.
+        "nikto",
         "nmap",
         "sslyze",
         "semgrep",
@@ -150,7 +132,7 @@ SCAN_TYPE_TOOLS: Final[dict[ScanType, tuple[str, ...]]] = {
         "nuclei",
         "zap",
         "wapiti",
-        # "nikto" — removed 2026-09-07, see the note above this dict.
+        "nikto",
         "sqlmap",
         "nmap",
         "sslyze",
