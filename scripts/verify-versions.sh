@@ -45,7 +45,7 @@ print(stable[0]['name'].replace('Python ', '') if stable else 'unknown')
 compare "Python" "3.13.13" "$PY_LATEST"
 
 GO_LATEST=$(curl -s "https://go.dev/VERSION?m=text" | head -1 | sed 's/go//')
-compare "Go" "1.26.2" "$GO_LATEST"
+compare "Go" "1.26.10" "$GO_LATEST"
 
 PG_LATEST=$(curl -s https://www.postgresql.org/versions.json | python3 -c "
 import json, sys
