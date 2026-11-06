@@ -82,7 +82,6 @@ from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
 from app.services.scan_compare import compute_diff
 from app.services.scan_queue import (
-    CancelPublisher,
     ProgressSubscriber,
     apply_cancel_state,
     publish_cancel_signal,

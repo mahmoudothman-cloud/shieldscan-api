@@ -36,8 +36,7 @@
 
 from __future__ import annotations
 
-import json
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -270,7 +269,6 @@ async def test_patch_replaces_existing_credential(project_setup, client, db_sess
 
     rows1 = (await db_session.execute(select(ProjectCredential))).scalars().all()
     assert len(rows1) == 1
-    original_id = rows1[0].id
     original_blob = rows1[0].encrypted_data
 
     r2 = await client.patch(

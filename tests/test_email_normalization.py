@@ -20,10 +20,10 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.models.identity import Organization, User
+from app.models.identity import Organization
 from app.db.tenant_context import set_tenant_context
 
 

@@ -16,28 +16,26 @@ Eight tests pinning the dispatch contract:
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
-from uuid import UUID, uuid4
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
 from app.dependencies import AuthIdentity
-from app.models.identity import APIKey, Membership, MembershipRole, Organization, User
+from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.audit import AuditLog
 from app.models.mobile import MobilePlatform, MobileUpload
 from app.models.projects import Project, ProjectCredential
 from app.models.recon import AttackSurface, SubdomainStatus
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
-from app.services.api_keys import generate_api_key
 from app.services.audit import ScanAction
 from app.services.auth import hash_password
 from app.services.credentials import encrypt_credential
 from app.services.orchestrator import (
     SCAN_TYPE_TOOLS,
     ScanOrchestrator,
-    ScanPriority,
     UnsupportedScanTypeError,
 )
 from tests.conftest import use_org

@@ -35,16 +35,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 
-from app.models.identity import APIKey, Membership, MembershipRole, Organization, User
+from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.projects import Project
 from app.models.scans import Scan, ScanStatus, ScanType
 from app.routes.scans import _parse_last_event_id, progress_generator
-from app.services.api_keys import generate_api_key
 from app.services.auth import create_access_token, hash_password
 from app.services.scan_queue import ProgressPublisher
 from tests.conftest import use_org
@@ -339,7 +338,7 @@ async def test_progress_with_last_event_id_replays_after_id(fake_redis):
     only event 3."""
     scan_id = str(uuid4())
     publisher = ProgressPublisher(fake_redis, scan_id=scan_id)
-    eid_1 = await publisher.publish({"event_type": "scan_status", "i": 1})
+    await publisher.publish({"event_type": "scan_status", "i": 1})
     eid_2 = await publisher.publish({"event_type": "scan_status", "i": 2})
     eid_3 = await publisher.publish({"event_type": "scan_status", "i": 3})
 

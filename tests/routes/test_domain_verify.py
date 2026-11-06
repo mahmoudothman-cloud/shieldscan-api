@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -16,11 +16,6 @@ from app.models.audit import AuditLog
 from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.projects import Project
 from app.services.auth import create_access_token, hash_password
-from app.services.domain_verify import (
-    VerifyResult,
-    verify_dns_txt,
-    verify_meta_tag,
-)
 from tests.conftest import use_org
 
 

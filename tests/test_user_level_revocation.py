@@ -16,7 +16,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from app.dependencies import AuthIdentity, get_auth_identity, get_current_user
+from app.dependencies import get_auth_identity
 from app.models.identity import Membership, MembershipRole, Organization, User
 from app.services.auth import (
     create_access_token,

@@ -336,7 +336,7 @@ async def test_list_projects_default_excludes_archived(
 ):
     org, _, headers = project_owner
     # Two projects; archive one.
-    r1 = await client.post(
+    await client.post(
         f"/v1/orgs/{org.id}/projects",
         json=_create_payload(name="active"),
         headers=headers,
@@ -363,7 +363,7 @@ async def test_list_projects_archived_true_includes_archived(
     client, project_owner
 ):
     org, _, headers = project_owner
-    r1 = await client.post(
+    await client.post(
         f"/v1/orgs/{org.id}/projects",
         json=_create_payload(name="active"),
         headers=headers,

@@ -20,14 +20,12 @@ don't depend on pubsub timing in fakeredis (per watch item F).
 
 from __future__ import annotations
 
-import json
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.models.audit import AuditLog
 from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.projects import Project

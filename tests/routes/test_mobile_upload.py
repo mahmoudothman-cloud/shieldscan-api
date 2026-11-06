@@ -25,9 +25,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
-from datetime import datetime, timezone
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -37,7 +35,7 @@ from sqlalchemy import select
 
 from app.models.audit import AuditLog
 from app.models.identity import APIKey, Membership, MembershipRole, Organization, User
-from app.models.mobile import MobilePlatform, MobileUpload
+from app.models.mobile import MobileUpload
 from app.models.projects import Project
 from app.services.api_keys import generate_api_key
 from app.services.auth import create_access_token, hash_password

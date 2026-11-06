@@ -45,7 +45,6 @@ from app.models.audit import AuditLog
 from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.mobile import MobilePlatform, MobileUpload
 from app.models.projects import Project
-from app.models.scans import Scan, ScanJob, ScanType
 from app.services.auth import create_access_token, hash_password
 from tests.conftest import use_org
 

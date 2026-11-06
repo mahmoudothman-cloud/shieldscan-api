@@ -172,7 +172,7 @@ async def test_subscriber_replay_then_live_seamless(fake_redis):
     XREAD BLOCK from last replayed id transitions cleanly to live —
     no duplicate, no skip."""
     pub = ProgressPublisher(fake_redis, scan_id="scn_p4")
-    eid_1 = await pub.publish({"i": 1})
+    await pub.publish({"i": 1})
     eid_2 = await pub.publish({"i": 2})
 
     sub = ProgressSubscriber(fake_redis, scan_id="scn_p4")
