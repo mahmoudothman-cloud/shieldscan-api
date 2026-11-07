@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+/* Design tokens from the approved dashboard design v1.0 (Design canvas). */
+@theme {
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-display: "Space Grotesk", "Inter", sans-serif;
+
+  --color-ink: #0b1220;
+  --color-ink-2: #2b3647;
+  --color-ink-3: #475467;
+  --color-muted: #7b8798;
+  --color-line: #e4e7ec;
+  --color-line-2: #eaecf0;
+  --color-paper: #ffffff;
+  --color-wash: #f6f7f9;
+  --color-wash-2: #f2f4f7;
+  --color-sidebar-text: #cbd2dc;
+
+  --color-brand: #0e7c86;
+  --color-brand-light: #5fc4cc;
+  --color-brand-wash: #e6f4f5;
+
+  --color-critical: #d92d20;
+  --color-critical-wash: #fef3f2;
+  --color-high: #b54708;
+  --color-high-wash: #fff7ed;
+  --color-medium: #ca8a04;
+  --color-medium-wash: #fefce8;
+  --color-low: #475467;
+  --color-low-wash: #f2f4f7;
+  --color-ok: #067647;
+  --color-ok-wash: #ecfdf3;
+  --color-ok-strong: #17b26a;
+  --color-warn: #f79009;
+
+  --radius-card: 12px;
+  --radius-control: 8px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  @apply bg-wash text-ink antialiased;
+  font-feature-settings: "cv11", "ss01";
+}
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+}

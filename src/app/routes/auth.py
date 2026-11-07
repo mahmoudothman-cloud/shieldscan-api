@@ -131,10 +131,42 @@ _UNAUTH = HTTPException(
 )
 
 
-def _tokens_for(user: User) -> TokenResponse:
+# Browser session cookie (CONSTITUTION §14.2: dashboard auth is JWT in an
+# httpOnly cookie; the SPA may not use localStorage). The REFRESH token
+# rides in the cookie, scoped to this router's path so it is only sent
+# to /auth/*; the short-lived access token is returned in the body and
+# the SPA keeps it in memory. Non-browser clients (CLI, Action, MCP)
+# ignore the cookie and keep using the body tokens — one endpoint, both
+# transports. ``Secure`` is relaxed in development so http://localhost
+# works. ``SameSite=Lax`` is enough because the app and API share a
+# registrable domain; the cookie never reaches cross-site POSTs.
+REFRESH_COOKIE = "shieldscan_refresh"
+_REFRESH_COOKIE_PATH = "/v1/auth"
+
+
+def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    response.set_cookie(
+        REFRESH_COOKIE,
+        refresh_token,
+        max_age=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path=_REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=settings.ENVIRONMENT != "development",
+        samesite="lax",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(REFRESH_COOKIE, path=_REFRESH_COOKIE_PATH)
+
+
+def _tokens_for(user: User, response: Response | None = None) -> TokenResponse:
+    refresh_token = create_refresh_token(sub=str(user.id))
+    if response is not None:
+        _set_refresh_cookie(response, refresh_token)
     return TokenResponse(
         access_token=create_access_token(sub=str(user.id)),
-        refresh_token=create_refresh_token(sub=str(user.id)),
+        refresh_token=refresh_token,
         user=UserResponse.model_validate(user),
     )
 
@@ -203,6 +235,7 @@ async def register(
 async def login(
     req: LoginRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     limiter: RateLimiter = Depends(get_rate_limiter),
 ):
@@ -283,7 +316,7 @@ async def login(
             user_agent=ua,
         )
     await db.commit()
-    return _tokens_for(user)
+    return _tokens_for(user, response)
 
 
 async def _first_org_id_for(db: AsyncSession, user_id: UUID) -> UUID | None:
@@ -304,17 +337,26 @@ async def _first_org_id_for(db: AsyncSession, user_id: UUID) -> UUID | None:
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
-    req: RefreshRequest,
     request: Request,
+    response: Response,
+    req: RefreshRequest | None = None,
     db: AsyncSession = Depends(get_db),
     redis=Depends(get_redis),
 ):
     ip = get_real_ip(request)
     ua = request.headers.get("User-Agent")
 
+    # 0. token source: body (programmatic clients) or the httpOnly
+    #    session cookie (browser). Body wins when both are present.
+    refresh_token = (req.refresh_token if req is not None else None) or request.cookies.get(
+        REFRESH_COOKIE
+    )
+    if not refresh_token:
+        raise _UNAUTH
+
     # 1. decode
     try:
-        payload = decode_token(req.refresh_token)
+        payload = decode_token(refresh_token)
     except (TokenExpiredError, TokenInvalidError, TokenError):
         raise _UNAUTH
 
@@ -378,9 +420,7 @@ async def refresh(
         try:
             revoked_before = await get_user_revoked_before(redis, sub)
         except Exception as e:
-            logger.error(
-                "redis user_revoked_before check failed on /refresh: %s", e
-            )
+            logger.error("redis user_revoked_before check failed on /refresh: %s", e)
             raise _UNAUTH from e
         if revoked_before is not None and iat < revoked_before:
             raise _UNAUTH  # token invalidated by password change
@@ -417,7 +457,7 @@ async def refresh(
         )
         await db.commit()
 
-    return _tokens_for(user)
+    return _tokens_for(user, response)
 
 
 # ---------------------------------------------------------------- logout
@@ -425,8 +465,8 @@ async def refresh(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    req: LogoutRequest,
     request: Request,
+    req: LogoutRequest | None = None,
     db: AsyncSession = Depends(get_db),
     redis=Depends(get_redis),
     current: User = Depends(get_current_user),
@@ -442,8 +482,11 @@ async def logout(
     # Decode body refresh token; on failure, logout is idempotent-ish —
     # we still 204 the client. Revocation only runs if the token was
     # valid+parsable.
+    refresh_token = (req.refresh_token if req is not None else None) or request.cookies.get(
+        REFRESH_COOKIE
+    )
     try:
-        payload = decode_token(req.refresh_token)
+        payload = decode_token(refresh_token) if refresh_token else {}
         if payload.get("type") == "refresh" and payload.get("jti") and payload.get("exp"):
             try:
                 await revoke(redis, payload["jti"], exp_unix=int(payload["exp"]))
@@ -468,7 +511,9 @@ async def logout(
         )
         await db.commit()
 
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    out = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _clear_refresh_cookie(out)
+    return out
 
 
 # ---------------------------------------------------------------- me
@@ -499,15 +544,9 @@ async def me(
     return AuthIdentityResponse(
         kind=identity.kind,
         organization=OrganizationSummary.model_validate(org),
-        user=(
-            UserResponse.model_validate(identity.user)
-            if identity.user is not None
-            else None
-        ),
+        user=(UserResponse.model_validate(identity.user) if identity.user is not None else None),
         api_key=(
-            APIKeySummary.model_validate(identity.api_key)
-            if identity.api_key is not None
-            else None
+            APIKeySummary.model_validate(identity.api_key) if identity.api_key is not None else None
         ),
     )
 
@@ -622,9 +661,7 @@ async def resend_verification(
     # Rate limit BEFORE any DB lookup — runs for nonexistent emails
     # too, so 429 behavior doesn't differ by existence. On denial we
     # silently drop and return the generic 200 (no 429 leakage).
-    result = await limiter.check(
-        "resend_verification_email", email, limit=3, window_seconds=3600
-    )
+    result = await limiter.check("resend_verification_email", email, limit=3, window_seconds=3600)
     if not result.allowed:
         return _RESEND_OK
 
@@ -719,9 +756,7 @@ async def change_password(
 
     # ALWAYS run verify_password — timing-stable across all 400 paths.
     current_ok = verify_password(body.current_password, user.hashed_password)
-    new_matches_current = verify_password(
-        body.new_password, user.hashed_password
-    )
+    new_matches_current = verify_password(body.new_password, user.hashed_password)
 
     if not current_ok or new_matches_current:
         raise _INVALID_CURRENT_PASSWORD
@@ -769,9 +804,7 @@ async def change_password(
 # ---------------------------------------------------------------- password reset (Task 2.Y)
 
 
-_FORGOT_PASSWORD_OK = {
-    "detail": "password_reset_email_sent_if_account_exists"
-}
+_FORGOT_PASSWORD_OK = {"detail": "password_reset_email_sent_if_account_exists"}
 
 
 @router.post("/forgot-password")
@@ -809,9 +842,7 @@ async def forgot_password(
         return _FORGOT_PASSWORD_OK
 
     # Per-email rate limit — runs even for nonexistent accounts.
-    result = await limiter.check(
-        "forgot_password_email", email, limit=3, window_seconds=3600
-    )
+    result = await limiter.check("forgot_password_email", email, limit=3, window_seconds=3600)
     if not result.allowed:
         return _FORGOT_PASSWORD_OK
 
@@ -853,9 +884,7 @@ async def forgot_password(
 @router.post(
     "/reset-password",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[
-        Depends(rate_limit("reset_password_ip", limit=20, window=3600))
-    ],
+    dependencies=[Depends(rate_limit("reset_password_ip", limit=20, window=3600))],
 )
 async def reset_password(
     body: ResetPasswordRequest,

@@ -110,11 +110,14 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str = Field(min_length=1)
+    """Body is optional for browser clients: the refresh token may come
+    from the ``shieldscan_refresh`` httpOnly cookie instead."""
+
+    refresh_token: str | None = Field(default=None, min_length=1)
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str = Field(min_length=1)
+    refresh_token: str | None = Field(default=None, min_length=1)
 
 
 class VerifyEmailRequest(BaseModel):
