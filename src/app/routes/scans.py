@@ -162,9 +162,14 @@ _TERMINAL_FINAL: frozenset[ScanStatus] = frozenset({
 # Scan types that bypass the domain-verified gate. Mobile = uploaded
 # artifact is the bound asset. Container = image is the bound asset.
 # project.target_url is informational for both, not an enforcement
-# surface.
+# surface. QUICK (M11, dashboard design v1.0 flow F2): the passive
+# read-only set (nuclei quick + sslyze) is exactly what the public
+# endpoint already runs for anyone with an email address, so gating it
+# behind DNS verification protects nothing; an unverified project can
+# run quick scans while the owner sets up the TXT record. Full scans
+# stay gated.
 _DOMAIN_VERIFY_BYPASS: frozenset[ScanType] = frozenset(
-    {ScanType.MOBILE, ScanType.CONTAINER}
+    {ScanType.MOBILE, ScanType.CONTAINER, ScanType.QUICK}
 )
 
 # Source-Ingestion Fix: ScanTypes that dispatch ``trivy-fs`` and

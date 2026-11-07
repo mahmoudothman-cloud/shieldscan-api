@@ -506,6 +506,16 @@ async def test_unverified_project_full_web_returns_403_domain_not_verified(
     assert r.json()["detail"] == "domain_not_verified"
 
 
+@pytest.mark.asyncio
+async def test_unverified_project_quick_scan_is_allowed(unverified_project, client):
+    """M11: QUICK bypasses the verification gate (passive set, same as the
+    public endpoint runs for anyone); full scans stay gated above."""
+    s = unverified_project
+    r = await client.post(_url(s), json={"scan_type": "quick"}, headers=s["headers"])
+    assert r.status_code == 201, r.text
+    assert r.json()["scan_type"] == "quick"
+
+
 # ============================================================ 18. eager-load regression guard
 
 

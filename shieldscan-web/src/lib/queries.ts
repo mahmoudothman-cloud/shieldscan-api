@@ -11,6 +11,12 @@ import type {
   OrgSummaryResponse,
   PaginatedProjectsResponse,
   PaginatedScansResponse,
+  ProjectCreateInput,
+  ProjectResponse,
+  ScanCreateInput,
+  ScanDetailResponse,
+  ScanResponse,
+  VerifyDomainSuccess,
 } from "./types";
 
 export const keys = {
@@ -128,4 +134,92 @@ export function useResetPassword() {
 export function useInvalidateOrg(orgId: string) {
   const qc = useQueryClient();
   return () => qc.invalidateQueries({ queryKey: keys.org(orgId) });
+}
+
+// ---------------------------------------------------------------- projects
+
+export function useProject(orgId: string, projectId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "project", projectId] as const,
+    queryFn: () => api<ProjectResponse>(`/v1/orgs/${orgId}/projects/${projectId}`),
+  });
+}
+
+export function useCreateProject(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ProjectCreateInput) =>
+      api<ProjectResponse>(`/v1/orgs/${orgId}/projects`, { method: "POST", body: input }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+export function useArchiveProject(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: string) =>
+      api<null>(`/v1/orgs/${orgId}/projects/${projectId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+export function useVerifyDomain(orgId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (method: "dns_txt" | "meta_tag") =>
+      api<VerifyDomainSuccess>(`/v1/orgs/${orgId}/projects/${projectId}/verify`, {
+        method: "POST",
+        body: { method },
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+export function useProjectScans(
+  orgId: string,
+  projectId: string,
+  params: { page?: number; per_page?: number } = {},
+) {
+  const p = { page: params.page ?? 1, per_page: params.per_page ?? 10 };
+  return useQuery({
+    queryKey: [...keys.org(orgId), "project", projectId, "scans", p] as const,
+    queryFn: () =>
+      api<PaginatedScansResponse>(`/v1/orgs/${orgId}/projects/${projectId}/scans${qs(p)}`),
+    refetchInterval: (q) =>
+      q.state.data?.items.some((s) => ACTIVE_STATUSES.includes(s.status)) ? 5_000 : false,
+  });
+}
+
+// ---------------------------------------------------------------- scans
+
+export const ACTIVE_STATUSES: string[] = ["queued", "reconning", "running", "analyzing"];
+
+export function useScan(orgId: string, scanId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "scan", scanId] as const,
+    queryFn: () => api<ScanDetailResponse>(`/v1/orgs/${orgId}/scans/${scanId}`),
+    refetchInterval: (q) =>
+      q.state.data && ACTIVE_STATUSES.includes(q.state.data.status) ? 4_000 : false,
+  });
+}
+
+export function useCreateScan(orgId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ScanCreateInput) =>
+      api<ScanResponse>(`/v1/orgs/${orgId}/projects/${projectId}/scans`, {
+        method: "POST",
+        body: input,
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+export function useCancelScan(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (scanId: string) =>
+      api<null>(`/v1/orgs/${orgId}/scans/${scanId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
 }

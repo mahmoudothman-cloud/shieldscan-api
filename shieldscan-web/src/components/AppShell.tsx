@@ -30,7 +30,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, ready: true },
-  { to: "/projects", label: "Projects", icon: FolderKanban, ready: false },
+  { to: "/projects", label: "Projects", icon: FolderKanban, ready: true },
   { to: "/vulnerabilities", label: "Vulnerabilities", icon: ShieldAlert, ready: false },
   { to: "/compliance", label: "Compliance", icon: ClipboardCheck, ready: false },
   { to: "/tools", label: "Tool health", icon: Wrench, ready: false },

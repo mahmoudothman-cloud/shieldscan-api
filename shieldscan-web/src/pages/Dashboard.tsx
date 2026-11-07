@@ -69,12 +69,12 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" disabled title="Projects page arrives in the next slice">
-            Add project
-          </Button>
-          <Button disabled title="Scan run arrives in the next slice">
-            Run a scan
-          </Button>
+          <Link to="/projects/new">
+            <Button variant="secondary">Add project</Button>
+          </Link>
+          <Link to="/projects">
+            <Button>Run a scan</Button>
+          </Link>
         </div>
       </header>
 

@@ -17,6 +17,10 @@ const VerifyEmail = lazy(() => import("@/pages/auth/VerifyEmail"));
 const ForgotPassword = lazy(() => import("@/pages/auth/ForgotPassword"));
 const ResetPassword = lazy(() => import("@/pages/auth/ResetPassword"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const ProjectsList = lazy(() => import("@/pages/projects/ProjectsList"));
+const NewProject = lazy(() => import("@/pages/projects/NewProject"));
+const ProjectDetail = lazy(() => import("@/pages/projects/ProjectDetail"));
+const ScanRun = lazy(() => import("@/pages/scans/ScanRun"));
 
 function RequireAuth() {
   const { status } = useAuth();
@@ -74,6 +78,10 @@ export default function App() {
         <Route element={<RequireAuth />}>
           <Route element={<AppShell />}>
             <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/projects" element={<ProjectsList />} />
+            <Route path="/projects/new" element={<NewProject />} />
+            <Route path="/projects/:projectId" element={<ProjectDetail />} />
+            <Route path="/scans/:scanId" element={<ScanRun />} />
           </Route>
         </Route>
 
