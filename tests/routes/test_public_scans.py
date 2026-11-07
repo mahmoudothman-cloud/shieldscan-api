@@ -170,7 +170,12 @@ async def test_create_happy_path(client, db_session, fake_redis, email_service_s
     payloads = [json.loads(q) for q in queued]
     assert all(p["scan_id"] == str(scan.id) for p in payloads)
     assert all(p["target"]["url"] == "https://shop.example.com/app" for p in payloads)
-    assert all(p["config"]["depth"] == "quick" for p in payloads)
+    # Passive template set, no severity filter (see PUBLIC_SCAN_TEMPLATE_TAGS).
+    assert all(p["config"]["depth"] == "deep" for p in payloads)
+    assert all(
+        p["config"]["template_categories"] == ["misconfig", "exposure", "ssl", "dns", "tech"]
+        for p in payloads
+    )
 
     # Result link emailed.
     assert len(email_service_stub.outbox) == 1

@@ -57,6 +57,16 @@ SEVERITY_PENALTY: dict[Severity, int] = {
 }
 _SEVERITY_RANK: dict[Severity, int] = {s: i for i, s in enumerate(Severity)}
 _TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "canceled"})
+
+# Nuclei template tags for the free scan: passive, read-only checks —
+# security headers / cookies / CSP (misconfig), exposed files, panels
+# and keys (exposure), TLS and DNS posture, technology fingerprints.
+# Sent as config.template_categories → engine "-tags". Depth "deep"
+# turns the severity filter off: the headline findings of a passive
+# scan are low/medium, which the QUICK default ("quick" → high,critical
+# only) would hide — a Juice Shop quick scan graded "A, 0 findings".
+PUBLIC_SCAN_TEMPLATE_TAGS: tuple[str, ...] = ("misconfig", "exposure", "ssl", "dns", "tech")
+PUBLIC_SCAN_DEPTH = "deep"
 _FINISHED_SCAN_STATUSES = frozenset({ScanStatus.COMPLETED, ScanStatus.PARTIAL})
 
 
@@ -153,7 +163,12 @@ async def create_public_scan(
         scan_type=ScanType.QUICK,
         status=ScanStatus.QUEUED,
         priority="normal",
-        config={"public": True, "target_url": target_url},
+        config={
+            "public": True,
+            "target_url": target_url,
+            "depth": PUBLIC_SCAN_DEPTH,
+            "template_categories": list(PUBLIC_SCAN_TEMPLATE_TAGS),
+        },
         recon_enabled=False,
         subdomain_limit=1,
         is_public=True,
