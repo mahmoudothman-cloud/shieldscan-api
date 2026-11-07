@@ -82,7 +82,28 @@ async def get_org_summary(
         )
     ).one()
 
-    # Open vulnerabilities by severity + corroborated (seen by ≥2 engines).
+    # Open vulnerabilities by severity + corroborated (seen by ≥2 engines),
+    # scoped to each live project's LATEST finished scan. Every scan
+    # creates its own vulnerability rows and nothing links a re-found
+    # issue to last week's copy yet (cross-scan dedup is the follow-up
+    # logged in shieldscan-docs/DRIFT-LOG.md, 2026-11-07), so counting
+    # across all scans would report one CSP gap fifty times. "What is
+    # open on my current targets" is the question the dashboard asks.
+    latest_scan_ids = (
+        select(Scan.id)
+        .join(Project, Project.id == Scan.project_id)
+        .where(
+            Scan.organization_id == org_id,
+            Scan.status.in_(_FINISHED),
+            Project.archived_at.is_(None),
+        )
+        .distinct(Scan.project_id)
+        .order_by(
+            Scan.project_id,
+            Scan.completed_at.desc().nulls_last(),
+            Scan.created_at.desc(),
+        )
+    ).scalar_subquery()
     sev_rows = (
         await db.execute(
             select(
@@ -95,6 +116,7 @@ async def get_org_summary(
             .where(
                 Vulnerability.organization_id == org_id,
                 Vulnerability.status == VulnerabilityStatus.OPEN,
+                Vulnerability.scan_id.in_(latest_scan_ids),
             )
             .group_by(Vulnerability.severity)
         )

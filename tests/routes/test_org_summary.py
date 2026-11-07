@@ -73,6 +73,13 @@ async def rich_org(client, db_session):
     await _mk_vuln(db_session, org, s_done, p_ok, Severity.MEDIUM)
     await _mk_vuln(db_session, org, s_part, p_ok, Severity.HIGH)
     await _mk_vuln(db_session, org, s_part, p_ok, Severity.LOW)
+    # Open MEDIUM on the OLDER scan of the same project: must NOT count
+    # (latest-finished-scan-per-project scoping).
+    await _mk_vuln(db_session, org, s_part, p_ok, Severity.MEDIUM)
+    # Open HIGH on the archived project's only scan: must NOT count either.
+    s_arch = await _mk_scan(db_session, org, p_arch, status=ScanStatus.COMPLETED)
+    s_arch.completed_at = now - timedelta(days=1)
+    await _mk_vuln(db_session, org, s_arch, p_arch, Severity.HIGH)
     await db_session.flush()
 
     # One corroborated open critical; one resolved high; one false-positive low.
@@ -125,12 +132,16 @@ async def test_summary_populated_org(client, rich_org):
     # Archived project excluded; unverified counted.
     assert body["projects"] == {"total": 2, "verified": 1, "unverified": 1}
 
-    # 6 scans total; RUNNING + QUEUED active; COMPLETED(3h) + PARTIAL(2d)
-    # inside 30d, the 40-day-old one outside, FAILED never counts.
-    assert body["scans"] == {"total": 6, "active": 2, "completed_30d": 2}
+    # 7 scans total; RUNNING + QUEUED active; COMPLETED(3h) + PARTIAL(2d)
+    # + archived project's (1d) inside 30d, the 40-day-old one outside,
+    # FAILED never counts. (Scan counts are lifetime org activity and
+    # deliberately include archived projects' history.)
+    assert body["scans"] == {"total": 7, "active": 2, "completed_30d": 3}
 
-    # Open only: critical 1 (corroborated), high 1 (the resolved one is
-    # out), medium 1; low was marked false-positive.
+    # Open, on each live project's latest finished scan only: critical 1
+    # (corroborated), high 1, medium 1. Excluded: the resolved high and
+    # false-positive low; the open medium on the OLDER scan of the same
+    # project; the open high on the archived project.
     assert body["open_vulnerabilities"] == {
         "critical": 1, "high": 1, "medium": 1, "low": 0, "info": 0,
         "total": 3, "corroborated": 1,

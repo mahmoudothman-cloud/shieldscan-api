@@ -27,7 +27,10 @@ class ScanCounts(BaseModel):
 
 
 class OpenVulnerabilityCounts(BaseModel):
-    """Vulnerabilities with status ``open`` only — the work still to do."""
+    """Vulnerabilities with status ``open`` on each live project's latest
+    finished scan — the work still to do on the targets as they are now.
+    Older scans' copies of the same issues are not counted (no cross-scan
+    dedup yet; see DRIFT-LOG 2026-11-07)."""
 
     critical: int = 0
     high: int = 0
