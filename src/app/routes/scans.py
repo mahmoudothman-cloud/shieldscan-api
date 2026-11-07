@@ -48,9 +48,12 @@ from __future__ import annotations
 import json
 import logging
 import time
+from enum import Enum
+from math import ceil
+from typing import TypeVar
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,15 +65,22 @@ from app.dependencies import (
 )
 from app.models.mobile import MobileUpload
 from app.models.projects import Project
+from app.models.raw_findings import RawFinding, Severity
 from app.models.recon import AttackSurface, SubdomainStatus
-from app.models.scans import Scan, ScanStatus, ScanType
+from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
 from app.models.vulnerabilities import Vulnerability
 from app.redis_client import get_redis
+from app.schemas.projects import PageNumber, PaginationMeta, PerPage
 from app.schemas.recon import AttackSurfaceResponse, SubdomainEntry
 from app.schemas.scans import (
+    PaginatedScansResponse,
     ScanCreateRequest,
+    ScanDetailResponse,
+    ScanJobDetail,
     ScanJobSummary,
+    ScanListItem,
     ScanResponse,
+    SeverityCounts,
 )
 from app.schemas.scan_compare import (
     ComparedFindingSummary,
@@ -501,6 +511,299 @@ async def compare_scans(
         new_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in new_vulns],
         resolved_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in resolved_vulns],
         persisting_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in persisting_vulns],
+    )
+
+
+# ================================================================ read endpoints (M11 pre-work)
+#
+# The dashboard, project page and scan page need three reads that the
+# M4/M10 surface never shipped: an org-wide scans list, a project-scoped
+# scans list, and a single-scan detail (the ``future GET`` the router
+# comments above promised). Conventions carried over unchanged:
+# require_org_membership + explicit organization_id filter (existence-
+# hiding 404), offset pagination with PaginationMeta, CSV enum filters
+# (M10.A), and no audit rows for reads.
+
+_SCAN_SORT_COLUMNS = {
+    "created_at": Scan.created_at,
+    "completed_at": Scan.completed_at,
+    "status": Scan.status,
+}
+
+# Job statuses that mean "this engine is done" for the N-of-M progress
+# figure. Matches the completions consumer's terminal set.
+_JOB_TERMINAL_STATUSES = ("completed", "failed", "canceled")
+
+_E = TypeVar("_E", bound=Enum)
+
+
+def _parse_csv_values(
+    raw: str | None, enum_cls: type[_E], param: str
+) -> list[_E] | None:
+    """CSV query param → enum members; 422 on an unknown token (M10.A Q2)."""
+    if raw is None:
+        return None
+    members: list[_E] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            members.append(enum_cls(token))
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"invalid {param} value: {token}"
+            ) from None
+    return members or None
+
+
+async def _scan_rollups(
+    db: AsyncSession, scan_ids: list[UUID]
+) -> tuple[dict[UUID, tuple[int, int]], dict[UUID, int]]:
+    """Per-scan (jobs_total, jobs_terminal) and vulnerability counts for
+    one page of scans — two grouped queries, never N+1."""
+    if not scan_ids:
+        return {}, {}
+    job_rows = (
+        await db.execute(
+            select(
+                ScanJob.scan_id,
+                func.count(ScanJob.id),
+                func.count(ScanJob.id).filter(
+                    ScanJob.status.in_(_JOB_TERMINAL_STATUSES)
+                ),
+            )
+            .where(ScanJob.scan_id.in_(scan_ids))
+            .group_by(ScanJob.scan_id)
+        )
+    ).all()
+    jobs = {sid: (int(total), int(term)) for sid, total, term in job_rows}
+    vuln_rows = (
+        await db.execute(
+            select(Vulnerability.scan_id, func.count(Vulnerability.id))
+            .where(Vulnerability.scan_id.in_(scan_ids))
+            .group_by(Vulnerability.scan_id)
+        )
+    ).all()
+    vulns = {sid: int(n) for sid, n in vuln_rows}
+    return jobs, vulns
+
+
+async def _paginated_scans(
+    db: AsyncSession,
+    *,
+    org_id: UUID,
+    page: int,
+    per_page: int,
+    sort: str,
+    status_filter: str | None,
+    scan_type_filter: str | None,
+    project_id: UUID | None,
+) -> PaginatedScansResponse:
+    descending = sort.startswith("-")
+    sort_key = sort.lstrip("-")
+    if sort_key not in _SCAN_SORT_COLUMNS:
+        raise HTTPException(status_code=422, detail=f"invalid sort key: {sort_key}")
+
+    where = [Scan.organization_id == org_id]
+    statuses = _parse_csv_values(status_filter, ScanStatus, "status")
+    if statuses:
+        where.append(Scan.status.in_(statuses))
+    types = _parse_csv_values(scan_type_filter, ScanType, "scan_type")
+    if types:
+        where.append(Scan.scan_type.in_(types))
+    if project_id is not None:
+        where.append(Scan.project_id == project_id)
+
+    count_stmt = select(func.count(Scan.id))
+    for clause in where:
+        count_stmt = count_stmt.where(clause)
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    col = _SCAN_SORT_COLUMNS[sort_key]
+    stmt = (
+        select(Scan, Project.name)
+        .join(Project, Project.id == Scan.project_id)
+    )
+    for clause in where:
+        stmt = stmt.where(clause)
+    # Deterministic secondary key so equal timestamps page stably.
+    stmt = stmt.order_by(
+        col.desc() if descending else col.asc(), Scan.id.desc()
+    )
+    stmt = stmt.offset((page - 1) * per_page).limit(per_page)
+    rows = (await db.execute(stmt)).all()
+
+    jobs, vulns = await _scan_rollups(db, [scan.id for scan, _ in rows])
+
+    items = []
+    for scan, project_name in rows:
+        jobs_total, jobs_terminal = jobs.get(scan.id, (0, 0))
+        items.append(
+            ScanListItem(
+                id=scan.id,
+                project_id=scan.project_id,
+                project_name=project_name,
+                scan_type=scan.scan_type.value,
+                status=scan.status.value,
+                priority=scan.priority,
+                created_at=scan.created_at,
+                started_at=scan.started_at,
+                completed_at=scan.completed_at,
+                jobs_total=jobs_total,
+                jobs_terminal=jobs_terminal,
+                vulnerability_count=vulns.get(scan.id, 0),
+                ai_pipeline_degraded=scan.ai_pipeline_degraded,
+            )
+        )
+
+    total_pages = max(1, ceil(total / per_page)) if total else 0
+    return PaginatedScansResponse(
+        items=items,
+        pagination=PaginationMeta(
+            page=page,
+            per_page=per_page,
+            total=total,
+            total_pages=total_pages,
+            has_next=page < total_pages,
+            has_prev=page > 1,
+        ),
+    )
+
+
+@scan_router.get("", response_model=PaginatedScansResponse)
+async def list_org_scans(
+    org_id: UUID,
+    identity: AuthIdentity = Depends(require_org_membership()),
+    db: AsyncSession = Depends(get_db),
+    page: PageNumber = 1,
+    per_page: PerPage = 20,
+    sort: str = Query("-created_at"),
+    status_: str | None = Query(None, alias="status"),
+    scan_type: str | None = Query(None),
+    project_id: UUID | None = Query(None),
+) -> PaginatedScansResponse:
+    """Org-wide scans list — the dashboard's "recent scans" and the
+    /scans page. Newest first by default; ``status`` and ``scan_type``
+    accept CSV; ``project_id`` narrows without a second route."""
+    return await _paginated_scans(
+        db,
+        org_id=org_id,
+        page=page,
+        per_page=per_page,
+        sort=sort,
+        status_filter=status_,
+        scan_type_filter=scan_type,
+        project_id=project_id,
+    )
+
+
+@project_scans_router.get("", response_model=PaginatedScansResponse)
+async def list_project_scans(
+    org_id: UUID,
+    project_id: UUID,
+    identity: AuthIdentity = Depends(require_org_membership()),
+    db: AsyncSession = Depends(get_db),
+    page: PageNumber = 1,
+    per_page: PerPage = 20,
+    sort: str = Query("-created_at"),
+    status_: str | None = Query(None, alias="status"),
+    scan_type: str | None = Query(None),
+) -> PaginatedScansResponse:
+    """Project-scoped scans list (the project page's Scans tab). 404 when
+    the project is missing or belongs to another tenant — the same
+    existence-hiding as create_scan, so a wrong project_id never reads
+    as an empty-but-valid list."""
+    exists = (
+        await db.execute(
+            select(Project.id).where(
+                Project.id == project_id, Project.organization_id == org_id
+            )
+        )
+    ).scalar_one_or_none()
+    if exists is None:
+        raise _NOT_FOUND
+    return await _paginated_scans(
+        db,
+        org_id=org_id,
+        page=page,
+        per_page=per_page,
+        sort=sort,
+        status_filter=status_,
+        scan_type_filter=scan_type,
+        project_id=project_id,
+    )
+
+
+@scan_router.get("/{scan_id}", response_model=ScanDetailResponse)
+async def get_scan(
+    org_id: UUID,
+    scan_id: UUID,
+    identity: AuthIdentity = Depends(require_org_membership()),
+    db: AsyncSession = Depends(get_db),
+) -> ScanDetailResponse:
+    """Single-scan header: identity, timing, outcome, per-engine jobs,
+    raw/unique counts and severity totals. Pure read; the findings list
+    and the executive narrative stay on their own endpoints."""
+    row = (
+        await db.execute(
+            select(Scan, Project.name, Project.target_url)
+            .join(Project, Project.id == Scan.project_id)
+            .where(Scan.id == scan_id, Scan.organization_id == org_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise _NOT_FOUND
+    scan, project_name, target_url = row
+
+    job_rows = (
+        await db.execute(
+            select(ScanJob)
+            .where(ScanJob.scan_id == scan_id)
+            .order_by(ScanJob.engine.asc())
+        )
+    ).scalars().all()
+
+    raw_count = (
+        await db.execute(
+            select(func.count(RawFinding.id)).where(RawFinding.scan_id == scan_id)
+        )
+    ).scalar_one()
+
+    sev_rows = (
+        await db.execute(
+            select(Vulnerability.severity, func.count(Vulnerability.id))
+            .where(Vulnerability.scan_id == scan_id)
+            .group_by(Vulnerability.severity)
+        )
+    ).all()
+    counts = {sev.value: int(n) for sev, n in sev_rows}
+    severity_counts = SeverityCounts(
+        **{s.value: counts.get(s.value, 0) for s in Severity}
+    )
+
+    return ScanDetailResponse(
+        id=scan.id,
+        project_id=scan.project_id,
+        project_name=project_name,
+        target_url=target_url,
+        organization_id=scan.organization_id,
+        scan_type=scan.scan_type.value,
+        status=scan.status.value,
+        priority=scan.priority,
+        recon_enabled=scan.recon_enabled,
+        subdomain_limit=scan.subdomain_limit,
+        mobile_upload_id=scan.mobile_upload_id,
+        created_at=scan.created_at,
+        started_at=scan.started_at,
+        completed_at=scan.completed_at,
+        error_message=scan.error_message,
+        ai_pipeline_degraded=scan.ai_pipeline_degraded,
+        executive_summary_available=bool(scan.executive_summary),
+        jobs=[ScanJobDetail.model_validate(j) for j in job_rows],
+        raw_finding_count=int(raw_count),
+        vulnerability_count=sum(counts.values()),
+        severity_counts=severity_counts,
     )
 
 

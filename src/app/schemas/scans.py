@@ -29,6 +29,7 @@ from pydantic import (
 )
 
 from app.models.scans import ScanType
+from app.schemas.projects import PaginationMeta
 from app.services.orchestrator import ScanPriority
 
 
@@ -140,3 +141,99 @@ class ScanResponse(BaseModel):
     mobile_upload_id: UUID | None
     created_at: datetime
     jobs: list[ScanJobSummary]
+
+
+# ---------------------------------------------------------------- read models (M11 pre-work)
+
+
+class ScanListItem(BaseModel):
+    """One row of ``GET /orgs/{org}/scans`` and the project-scoped list.
+
+    Mid-weight on purpose (mirrors the M10.A list/detail split): enough
+    for a scans table — who, what, when, how far, how bad — without the
+    per-job breakdown. ``jobs_total``/``jobs_terminal`` give the
+    "6 of 7" progress the dashboard shows; ``vulnerability_count`` is
+    post-AI-pipeline (0 while the scan is active).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    project_name: str
+    scan_type: str
+    status: str
+    priority: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    jobs_total: int
+    jobs_terminal: int
+    vulnerability_count: int
+    ai_pipeline_degraded: bool
+
+
+class PaginatedScansResponse(BaseModel):
+    """List envelope mirroring PaginatedProjectsResponse."""
+
+    items: list[ScanListItem]
+    pagination: PaginationMeta
+
+
+class ScanJobDetail(BaseModel):
+    """Per-engine row on the scan detail page (progress bars + errors)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    engine: str
+    target_url: str
+    status: str
+    finding_count: int
+    duration_ms: int | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SeverityCounts(BaseModel):
+    """Vulnerabilities by severity for one scan (all statuses)."""
+
+    critical: int = 0
+    high: int = 0
+    medium: int = 0
+    low: int = 0
+    info: int = 0
+
+
+class ScanDetailResponse(BaseModel):
+    """``GET /orgs/{org}/scans/{scan_id}`` body.
+
+    The header of the scan page: identity, timing, outcome, the job
+    breakdown, and severity totals. Findings themselves come from the
+    per-scan vulnerabilities list; the narrative from ``/report/executive``.
+    ``executive_summary_available`` lets the client decide whether to
+    render that tab without a second round-trip.
+    """
+
+    id: UUID
+    project_id: UUID
+    project_name: str
+    target_url: str
+    organization_id: UUID
+    scan_type: str
+    status: str
+    priority: str
+    recon_enabled: bool
+    subdomain_limit: int
+    mobile_upload_id: UUID | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
+    ai_pipeline_degraded: bool
+    executive_summary_available: bool
+    jobs: list[ScanJobDetail]
+    raw_finding_count: int
+    vulnerability_count: int
+    severity_counts: SeverityCounts
