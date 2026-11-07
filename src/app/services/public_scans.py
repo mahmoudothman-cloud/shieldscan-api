@@ -70,6 +70,14 @@ PUBLIC_SCAN_DEPTH = "deep"
 _FINISHED_SCAN_STATUSES = frozenset({ScanStatus.COMPLETED, ScanStatus.PARTIAL})
 
 
+def _display_order(f: RawFinding) -> tuple[int, int, str]:
+    """Severity first; within a severity, real findings before technology
+    fingerprints (a live Juice Shop scan returned 18 info-level "tech"
+    rows that would otherwise fill the three visible slots)."""
+    is_tech = 1 if "tech" in (f.tags or []) else 0
+    return (_SEVERITY_RANK[f.severity], is_tech, f.title)
+
+
 def new_slug() -> str:
     """URL-safe, ~128-bit token. Unguessable by construction; the only
     way to a result page is the emailed link."""
@@ -233,7 +241,7 @@ async def build_result(db: AsyncSession, public: PublicScan) -> PublicScanResult
                 )
             ).scalars()
         )
-        findings.sort(key=lambda f: (_SEVERITY_RANK[f.severity], f.title))
+        findings.sort(key=_display_order)
 
     counts = PublicSeverityCounts(total=len(findings))
     for f in findings:

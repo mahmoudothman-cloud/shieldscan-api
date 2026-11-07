@@ -253,7 +253,7 @@ async def test_get_unknown_slug(client):
 
 
 @pytest.mark.asyncio
-async def test_get_queued_then_completed(client, db_session):
+async def test_get_queued_then_completed(client, db_session, monkeypatch):
     r = await client.post(URL, json=_payload(target_url="https://res.example.com"))
     slug = r.json()["slug"]
 
@@ -280,6 +280,24 @@ async def test_get_queued_then_completed(client, db_session):
             (Severity.MEDIUM, "Cookie without Secure flag"),
         ],
     )
+    # Two more INFO rows: a tech fingerprint must sort after a plain info finding.
+    scan = await db_session.get(Scan, public.scan_id)
+    for title, tags in (("Apache fingerprint", ["tech"]), ("Robots.txt present", None)):
+        db_session.add(
+            RawFinding(
+                organization_id=org.id,
+                scan_id=scan.id,
+                tool_name="nuclei",
+                engine_category=EngineCategory.DAST,
+                finding_type="tech",
+                severity=Severity.INFO,
+                title=title,
+                tags=tags,
+                target_url=public.target_url,
+                fingerprint=uuid4().hex,
+            )
+        )
+    await db_session.commit()
 
     r = await client.get(f"{URL}/{slug}")
     assert r.status_code == 200
@@ -294,18 +312,29 @@ async def test_get_queued_then_completed(client, db_session):
         "high": 1,
         "medium": 2,
         "low": 1,
-        "info": 1,
-        "total": 5,
+        "info": 3,
+        "total": 7,
     }
     titles = [f["title"] for f in body["findings"]]
     assert titles == ["Exposed .git directory", "CSP header missing", "Cookie without Secure flag"]
     assert body["findings"][0]["severity"] == "high"
     assert body["findings"][0]["engine"] == "nuclei"
     assert body["findings"][0]["summary"].startswith("Exposed .git directory")
-    assert body["hidden_count"] == 2
+    assert body["hidden_count"] == 4
+
+    # Display order with all findings visible: tech fingerprints sort last
+    # within their severity.
+    monkeypatch.setattr(settings, "PUBLIC_SCAN_VISIBLE_FINDINGS", 10)
+    r = await client.get(f"{URL}/{slug}")
+    titles = [f["title"] for f in r.json()["findings"]]
+    assert titles[-3:] == [
+        "Robots.txt present",
+        "Server header reveals nginx",
+        "Apache fingerprint",
+    ]
 
     await db_session.refresh(public)
-    assert public.viewed_count == 2
+    assert public.viewed_count == 3
 
 
 @pytest.mark.asyncio
