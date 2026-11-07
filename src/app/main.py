@@ -36,6 +36,7 @@ from app.routes import compliance as compliance_routes
 from app.routes import mobile as mobile_routes
 from app.routes import orgs as orgs_routes
 from app.routes import projects as projects_routes
+from app.routes import public_scans as public_scans_routes
 from app.routes import reports as reports_routes
 from app.routes import scans as scans_routes
 from app.routes import tools as tools_routes
@@ -158,6 +159,7 @@ async def ready(redis=Depends(get_redis)) -> Any:
 app.include_router(auth_routes.router, prefix="/v1")
 app.include_router(api_keys_routes.router, prefix="/v1")
 app.include_router(orgs_routes.router, prefix="/v1")
+app.include_router(public_scans_routes.router, prefix="/v1")
 app.include_router(projects_routes.router, prefix="/v1")
 app.include_router(mobile_routes.router, prefix="/v1")
 app.include_router(scans_routes.project_scans_router, prefix="/v1")

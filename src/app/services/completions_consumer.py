@@ -1039,10 +1039,15 @@ class CompletionsConsumer:
                 RawFinding.scan_id == scan_id
             )
         )
-        if not raw_findings_count:
+        # Public quick scans (M11 pre-work) never enter the AI pipeline:
+        # the result page is built from raw findings, and free scans must
+        # not spend AI budget. Finalise inline exactly like the empty-scan
+        # fast path.
+        if not raw_findings_count or scan.is_public:
             scan.status = (
                 ScanStatus.COMPLETED if all_ok else ScanStatus.PARTIAL
             )
+            scan.completed_at = datetime.now(timezone.utc)
             await db.flush()
             finding_count_total = sum(j.finding_count or 0 for j in sibling_jobs)
             await audit(

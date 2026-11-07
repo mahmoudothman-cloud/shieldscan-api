@@ -13,6 +13,7 @@ from app.models import (  # noqa: F401
     identity,
     mobile,
     projects,
+    public_scans,
     raw_findings,
     recon,
     reports,

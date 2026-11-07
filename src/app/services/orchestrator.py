@@ -284,8 +284,12 @@ class ScanOrchestrator:
         #    keys remain unique within the scan).
         unix_ts = int(time.time())
         target_url = scan.project.target_url if scan.scan_type != ScanType.MOBILE else ""
+        if scan.is_public:
+            # Public quick scans probe the exact URL the requester typed
+            # (path included); the system-org project only groups them.
+            target_url = (scan.config or {}).get("target_url") or target_url
 
-        if scan.scan_type in _WEB_SCAN_TYPES:
+        if scan.scan_type in _WEB_SCAN_TYPES and not scan.is_public:
             # M8.1β.2 ADR-028 Phase-1: dispatch a SINGLE recon ScanJob
             # (engine="recon"; orchestrator-implicit per Y-RECON-ENGINE-
             # NAME a.ii). The per-(target, tool) tool ScanJobs are
@@ -310,6 +314,13 @@ class ScanOrchestrator:
             # Non-web ScanTypes (API, MOBILE, CONTAINER): no recon phase;
             # dispatch all SCAN_TYPE_TOOLS engines directly (existing
             # behavior preserved).
+            #
+            # Public quick scans (``scan.is_public``, M11 pre-work) take
+            # this path too: no recon, no subdomain expansion — the free
+            # scan probes exactly the URL the requester typed, which is
+            # what keeps it bounded (a public scan of a large domain must
+            # never fan out into hundreds of jobs). See DRIFT-LOG
+            # 2026-11-07 (public quick scans).
             tools = SCAN_TYPE_TOOLS[scan.scan_type]
             jobs = [
                 ScanJob(
@@ -445,7 +456,13 @@ class ScanOrchestrator:
         #    re-dispatches them; see the module docstring.
         for job in jobs:
             payload = await self._build_job_payload(
-                scan, job, auth_payload, mobile_payload
+                scan,
+                job,
+                auth_payload,
+                mobile_payload,
+                # Public quick scans: wire target is the typed URL (set on
+                # the ScanJob above), not the system project's root.
+                target_url_override=job.target_url if scan.is_public else None,
             )
             await self.queue.dispatch(priority.value, payload)
 

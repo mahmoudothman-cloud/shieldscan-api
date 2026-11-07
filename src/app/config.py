@@ -65,6 +65,19 @@ class Settings(BaseSettings):
     # that the target is a SPA, not a finding (74 raw findings on one live scan).
     PROMOTION_DENYLIST_PLUGIN_IDS: str = "10109"
 
+    # Public quick scans (M11 pre-work; ADDENDUM-CRITICAL-5 §2). Scans run
+    # inside one system organization, created on first use by slug; results
+    # are addressed by an emailed token and expire. Limits are per fixed
+    # window (services.rate_limiter): one scan per email per day, five per
+    # IP per hour (approved dashboard design v1.0, flow F1).
+    PUBLIC_SCAN_ORG_SLUG: str = "shieldscan-public"
+    PUBLIC_SCAN_EMAIL_DAILY_LIMIT: int = 1
+    PUBLIC_SCAN_IP_HOURLY_LIMIT: int = 5
+    PUBLIC_SCAN_RESULT_TTL_DAYS: int = 7
+    PUBLIC_SCAN_VISIBLE_FINDINGS: int = 3
+    # Base URL of the web app, for links in emails and public responses.
+    APP_BASE_URL: str = "https://app.shieldscan.io"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
