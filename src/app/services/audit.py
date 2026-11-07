@@ -148,6 +148,21 @@ class VulnerabilityAction(str, PyEnum):
     VULNERABILITY_STATUS_CHANGED = "vulnerability.status_changed"  # M10.A PATCH endpoint; one row per actual transition (Q8)
 
 
+class OrgAction(str, PyEnum):
+    """Organization-domain audit events (M11 pre-work: settings + members).
+
+    Same per-domain split as the enums above. Membership changes are the
+    one place a tenant's trust boundary moves, so every one of them is a
+    row: who was added, with which role, by whom; every role change with
+    its from/to; every removal.
+    """
+
+    ORG_UPDATED = "organization.updated"  # PATCH /orgs/{id}; details.fields lists what changed
+    MEMBER_INVITED = "organization.member_invited"  # POST /members; details.target_user_id + role
+    MEMBER_ROLE_CHANGED = "organization.member_role_changed"  # PATCH /members/{uid}; previous_role → role
+    MEMBER_REMOVED = "organization.member_removed"  # DELETE /members/{uid}
+
+
 # Registry of all action-enum classes. Add new enums here as they
 # land (FindingAction, etc.) so the global-disjointness test
 # auto-covers them without manual updates.
@@ -156,6 +171,7 @@ ALL_ACTION_ENUMS: tuple[type[PyEnum], ...] = (
     ProjectAction,
     ScanAction,
     VulnerabilityAction,
+    OrgAction,
 )
 
 
@@ -185,6 +201,10 @@ class AuditDetails(TypedDict, total=False):
     job_count: int  # number of ScanJob rows dispatched
     finding_count: int  # aggregate findings from a completed scan
     failure_reason: str  # e.g. "all_jobs_failed" — terminal-state context
+    role: str  # membership role granted / resulting ("admin" | "member" | "viewer")
+    previous_role: str  # membership role before a change
+    fields: list[str]  # names of the org settings fields a PATCH changed
+    invited_new_user: bool  # invite created the user (vs. added an existing one)
 
 
 async def audit(
@@ -192,7 +212,7 @@ async def audit(
     *,
     organization_id: UUID,
     actor_id: UUID | None,
-    action: AuthAction | ProjectAction | ScanAction | VulnerabilityAction,
+    action: AuthAction | ProjectAction | ScanAction | VulnerabilityAction | OrgAction,
     resource_type: str,
     resource_id: UUID | None = None,
     ip_address: str | None = None,
