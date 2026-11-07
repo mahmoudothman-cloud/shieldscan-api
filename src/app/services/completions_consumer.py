@@ -939,6 +939,24 @@ class CompletionsConsumer:
 
     # ---------------------------------------------------------------- aggregate
 
+    async def _mark_running(self, db: AsyncSession, scan_id: UUID) -> None:
+        """QUEUED → RUNNING + ``started_at`` on the first job report.
+
+        Idempotent: a scan already past QUEUED (RUNNING, ANALYZING,
+        CANCELED, terminal) is left alone, so cancel-wins and the AI
+        pipeline's ownership of later transitions are preserved.
+        ``started_at`` is stamped only when still NULL.
+        """
+        scan = (
+            await select_fresh(db, select(Scan).where(Scan.id == scan_id))
+        ).scalar_one_or_none()
+        if scan is None or scan.status != ScanStatus.QUEUED:
+            return
+        scan.status = ScanStatus.RUNNING
+        if scan.started_at is None:
+            scan.started_at = datetime.now(timezone.utc)
+        await db.flush()
+
     async def _maybe_complete_scan(
         self, db: AsyncSession, scan_id: UUID
     ) -> UUID | None:
@@ -965,6 +983,14 @@ class CompletionsConsumer:
             )
         ).scalars().all()
         if not all(j.status in _TERMINAL_JOB_STATUSES for j in sibling_jobs):
+            # M11 pre-work: the first job to report back is the earliest
+            # PG-visible proof the scan is executing. Workers never write
+            # scans (ADR-013), so until now a scan sat in QUEUED from
+            # dispatch to the last job — the dashboard could not tell
+            # "waiting for a worker" from "six engines running". Flip
+            # QUEUED → RUNNING and stamp started_at here; terminal and
+            # ANALYZING transitions are untouched.
+            await self._mark_running(db, scan_id)
             return None
 
         any_failed = any(
@@ -999,6 +1025,11 @@ class CompletionsConsumer:
             ScanStatus.ANALYZING,
         }:
             return None
+
+        # A single-job scan reaches here straight from QUEUED; make sure
+        # it still carries a start time (same stamp _mark_running uses).
+        if scan.started_at is None:
+            scan.started_at = datetime.now(timezone.utc)
 
         # DQ3: no raw_findings → nothing for the AI pipeline to analyse;
         # transition straight to terminal inline (preserves the empty-scan

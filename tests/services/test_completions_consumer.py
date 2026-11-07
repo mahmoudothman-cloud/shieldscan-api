@@ -223,6 +223,57 @@ async def test_consumer_aggregates_scan_status_when_all_jobs_terminal(
         assert audits[0].resource_id == s["scan"].id
 
 
+# ---------------------------------------------------------------- 10b. first job report → RUNNING + started_at
+
+
+@pytest.mark.asyncio
+async def test_first_job_report_moves_queued_scan_to_running(
+    scan_with_jobs, fake_redis, db_session, session_factory
+):
+    """M11 pre-work. Workers never write ``scans`` (ADR-013), so the
+    first terminal job event is the earliest proof the scan executes:
+    QUEUED → RUNNING with ``started_at`` stamped once. A later job report
+    must not re-stamp it, and the final aggregate still lands as usual.
+    """
+    s = scan_with_jobs
+    # Fixture seeds RUNNING; this test needs the dispatch-time state.
+    s["scan"].status = ScanStatus.QUEUED
+    s["scan"].started_at = None
+    await db_session.commit()
+
+    consumer = CompletionsConsumer(
+        session_factory=session_factory, redis=fake_redis
+    )
+    await consumer._handle(_completion_event(s["jobs"][0]))
+
+    async with session_factory() as fresh:
+        await set_tenant_context(fresh, s["org"].id)
+        row = (
+            await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
+        ).scalar_one()
+        assert row.status == ScanStatus.RUNNING
+        assert row.started_at is not None
+        first_stamp = row.started_at
+
+    await consumer._handle(_completion_event(s["jobs"][1]))
+    async with session_factory() as fresh:
+        await set_tenant_context(fresh, s["org"].id)
+        row = (
+            await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
+        ).scalar_one()
+        assert row.status == ScanStatus.RUNNING
+        assert row.started_at == first_stamp
+
+    await consumer._handle(_completion_event(s["jobs"][2]))
+    async with session_factory() as fresh:
+        await set_tenant_context(fresh, s["org"].id)
+        row = (
+            await fresh.execute(select(Scan).where(Scan.id == s["scan"].id))
+        ).scalar_one()
+        assert row.status == ScanStatus.COMPLETED
+        assert row.started_at == first_stamp
+
+
 # ---------------------------------------------------------------- 11. partial
 
 
