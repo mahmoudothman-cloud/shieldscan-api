@@ -410,6 +410,14 @@ async def test_fix_returns_ai_fix_text(client, db_session, vuln_org):
     )
     assert r.status_code == 200
     assert r.json()["ai_fix_text"] == "## Explanation\nfix it"
+    assert r.json()["is_fallback"] is False
+
+    vuln.ai_fix_is_fallback = True
+    await db_session.commit()
+    r = await client.get(
+        f"/v1/orgs/{org.id}/vulnerabilities/{vuln.id}/fix", headers=headers
+    )
+    assert r.json()["is_fallback"] is True
 
 
 async def test_fix_null_when_not_generated(client, db_session, vuln_org):

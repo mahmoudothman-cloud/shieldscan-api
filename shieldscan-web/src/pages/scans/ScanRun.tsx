@@ -49,14 +49,10 @@ export default function ScanRun() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {s.status === "completed" || s.status === "partial" ? (
-            <Button
-              variant="secondary"
-              disabled
-              title="Vulnerability explorer arrives in the next slice"
-            >
-              View {s.vulnerability_count} vulnerabilities
-            </Button>
+          {(s.status === "completed" || s.status === "partial") && s.vulnerability_count > 0 ? (
+            <Link to={`/vulnerabilities?scan_id=${s.id}`}>
+              <Button variant="secondary">View {s.vulnerability_count} vulnerabilities</Button>
+            </Link>
           ) : null}
           {active && (
             <Button

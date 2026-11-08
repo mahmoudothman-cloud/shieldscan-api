@@ -322,7 +322,11 @@ async def get_vulnerability_fix(
     # Q9: ungated at M10.A; tier-enforcement (SPEC §9 — AI fix generation
     # unavailable at Free) forward-pinned to the billing milestone.
     vuln = await _load_vuln(db, org_id, vid)
-    return FixResponse(vulnerability_id=vuln.id, ai_fix_text=vuln.ai_fix_text)
+    return FixResponse(
+        vulnerability_id=vuln.id,
+        ai_fix_text=vuln.ai_fix_text,
+        is_fallback=vuln.ai_fix_is_fallback,
+    )
 
 
 # ---------------------------------------------------------------- history

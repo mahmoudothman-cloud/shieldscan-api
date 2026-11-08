@@ -226,7 +226,7 @@ export function Empty({
   action,
 }: {
   title: string;
-  body?: string;
+  body?: string | undefined;
   action?: ReactNode;
 }) {
   return (

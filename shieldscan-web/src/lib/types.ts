@@ -193,3 +193,65 @@ export interface ProgressEvent {
   status?: string;
   [k: string]: unknown;
 }
+
+export type VulnerabilityStatus = "open" | "resolved" | "false_positive" | "accepted_risk";
+export type EngineCategory =
+  "dast" | "sast" | "sca" | "mobile" | "infrastructure" | "recon" | "ssl";
+
+export interface VulnerabilityListItem {
+  id: string;
+  title: string;
+  severity: Severity;
+  severity_score: number | null;
+  status: VulnerabilityStatus;
+  cwe_id: string | null;
+  engine_category: EngineCategory;
+  corroborated_count: number;
+  scan_id: string;
+  created_at: string;
+}
+
+export interface VulnerabilityDetail extends VulnerabilityListItem {
+  description: string | null;
+  target_url: string | null;
+  code_file: string | null;
+  code_line: number | null;
+  parameter: string | null;
+  mobile_os: string | null;
+  mobile_permission: string | null;
+  mobile_component_name: string | null;
+  correlation_cluster_id: string | null;
+  updated_at: string;
+}
+
+export interface PaginatedVulnerabilitiesResponse {
+  items: VulnerabilityListItem[];
+  pagination: PaginationMeta;
+}
+
+export interface EvidenceItem {
+  raw_finding_id: string;
+  tool_name: string;
+  engine_category: EngineCategory;
+  description: string | null;
+  code_snippet: string | null;
+  code_file: string | null;
+  code_line: number | null;
+  target_url: string | null;
+  parameter: string | null;
+}
+
+export interface FixResponse {
+  vulnerability_id: string;
+  ai_fix_text: string | null;
+  is_fallback: boolean;
+}
+
+export interface VulnerabilityHistoryItem {
+  id: string;
+  from_status: VulnerabilityStatus;
+  to_status: VulnerabilityStatus;
+  changed_by: string | null;
+  notes: string | null;
+  created_at: string;
+}

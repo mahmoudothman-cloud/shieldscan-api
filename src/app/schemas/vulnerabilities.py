@@ -86,10 +86,13 @@ class EvidenceItem(BaseModel):
 
 
 class FixResponse(BaseModel):
-    """/fix response (Q7/Q9): the ai_fix_text surface."""
+    """/fix response (Q7/Q9): the ai_fix_text surface. ``is_fallback`` tells
+    the client the text is the deterministic template, not model output,
+    so the UI can label it instead of presenting it as a tailored fix."""
 
     vulnerability_id: UUID
     ai_fix_text: str | None
+    is_fallback: bool = False
 
 
 class PaginatedVulnerabilitiesResponse(BaseModel):

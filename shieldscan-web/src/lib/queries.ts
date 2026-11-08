@@ -17,6 +17,12 @@ import type {
   ScanDetailResponse,
   ScanResponse,
   VerifyDomainSuccess,
+  EvidenceItem,
+  FixResponse,
+  PaginatedVulnerabilitiesResponse,
+  VulnerabilityDetail,
+  VulnerabilityHistoryItem,
+  VulnerabilityStatus,
 } from "./types";
 
 export const keys = {
@@ -220,6 +226,76 @@ export function useCancelScan(orgId: string) {
   return useMutation({
     mutationFn: (scanId: string) =>
       api<null>(`/v1/orgs/${orgId}/scans/${scanId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+// ---------------------------------------------------------------- vulnerabilities
+
+export interface VulnFilters {
+  page?: number;
+  per_page?: number;
+  sort?: string;
+  severity?: string;
+  status?: string;
+  engine_category?: string;
+  scan_id?: string;
+  project_id?: string;
+}
+
+function clean(params: VulnFilters): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") out[k] = v;
+  return out;
+}
+
+export function useVulnerabilities(orgId: string, filters: VulnFilters) {
+  const p = clean({ page: 1, per_page: 25, sort: "-severity_score", ...filters });
+  return useQuery({
+    queryKey: [...keys.org(orgId), "vulnerabilities", p] as const,
+    queryFn: () =>
+      api<PaginatedVulnerabilitiesResponse>(`/v1/orgs/${orgId}/vulnerabilities${qs(p)}`),
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useVulnerability(orgId: string, vid: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "vulnerability", vid] as const,
+    queryFn: () => api<VulnerabilityDetail>(`/v1/orgs/${orgId}/vulnerabilities/${vid}`),
+  });
+}
+
+export function useVulnerabilityEvidence(orgId: string, vid: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "vulnerability", vid, "evidence"] as const,
+    queryFn: () => api<EvidenceItem[]>(`/v1/orgs/${orgId}/vulnerabilities/${vid}/evidence`),
+  });
+}
+
+export function useVulnerabilityFix(orgId: string, vid: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "vulnerability", vid, "fix"] as const,
+    queryFn: () => api<FixResponse>(`/v1/orgs/${orgId}/vulnerabilities/${vid}/fix`),
+  });
+}
+
+export function useVulnerabilityHistory(orgId: string, vid: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "vulnerability", vid, "history"] as const,
+    queryFn: () =>
+      api<VulnerabilityHistoryItem[]>(`/v1/orgs/${orgId}/vulnerabilities/${vid}/history`),
+  });
+}
+
+export function useUpdateVulnerabilityStatus(orgId: string, vid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { status: VulnerabilityStatus; notes?: string }) =>
+      api<VulnerabilityDetail>(`/v1/orgs/${orgId}/vulnerabilities/${vid}`, {
+        method: "PATCH",
+        body: input,
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
   });
 }
