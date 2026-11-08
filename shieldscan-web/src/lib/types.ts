@@ -292,3 +292,25 @@ export interface APIKeyCreatedResponse {
   plaintext_key: string;
   created_at: string;
 }
+
+export interface ReportManifest {
+  scan_id: string;
+  status: ScanStatus;
+  available_formats: string[];
+  pdf: { generated: boolean; generated_at: string; size_bytes: number } | null;
+}
+
+export interface PdfReportResponse {
+  format: "pdf";
+  download_url: string;
+  expires_at: string;
+  expires_in: number;
+  generated_at: string;
+  size_bytes: number;
+}
+
+export interface ExecutiveReportResponse {
+  scan_id: string;
+  executive_summary: string | null;
+  generated_at: string;
+}

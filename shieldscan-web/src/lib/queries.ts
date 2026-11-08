@@ -28,6 +28,9 @@ import type {
   MemberInviteResponse,
   MemberItem,
   OrgPatchInput,
+  ExecutiveReportResponse,
+  PdfReportResponse,
+  ReportManifest,
 } from "./types";
 
 export const keys = {
@@ -379,5 +382,51 @@ export function useRevokeApiKey() {
   return useMutation({
     mutationFn: (keyId: string) => api<null>(`/v1/auth/api-keys/${keyId}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: API_KEYS_KEY }),
+  });
+}
+
+// ---------------------------------------------------------------- reports
+
+export function useReportManifest(orgId: string, scanId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "scan", scanId, "report"] as const,
+    queryFn: () => api<ReportManifest>(`/v1/orgs/${orgId}/scans/${scanId}/report`),
+    retry: false,
+  });
+}
+
+export function useExecutiveReport(orgId: string, scanId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "scan", scanId, "report", "executive"] as const,
+    queryFn: () =>
+      api<ExecutiveReportResponse>(`/v1/orgs/${orgId}/scans/${scanId}/report/executive`),
+    enabled,
+    retry: false,
+  });
+}
+
+/** PDF is generated on first request and stored; the response is a short-lived signed URL. */
+export function useRequestPdf(orgId: string, scanId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<PdfReportResponse>(`/v1/orgs/${orgId}/scans/${scanId}/report/pdf`),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: [...keys.org(orgId), "scan", scanId, "report"] }),
+  });
+}
+
+/** SARIF / JSON are rendered inline by the API; fetch and hand to the browser as a file. */
+export function useDownloadInline(orgId: string, scanId: string) {
+  return useMutation({
+    mutationFn: async (format: "sarif" | "json") => {
+      const body = await api<unknown>(`/v1/orgs/${orgId}/scans/${scanId}/report/${format}`);
+      const blob = new Blob([JSON.stringify(body, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `shieldscan-${scanId.slice(0, 8)}.${format === "sarif" ? "sarif.json" : "json"}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    },
   });
 }
