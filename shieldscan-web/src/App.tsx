@@ -27,6 +27,8 @@ const Settings = lazy(() => import("@/pages/settings/Settings"));
 const ScanReport = lazy(() => import("@/pages/reports/ScanReport"));
 const QuickScanLanding = lazy(() => import("@/pages/public/QuickScanLanding"));
 const QuickScanResult = lazy(() => import("@/pages/public/QuickScanResult"));
+const Compliance = lazy(() => import("@/pages/compliance/Compliance"));
+const ToolHealth = lazy(() => import("@/pages/tools/ToolHealth"));
 
 function RequireAuth() {
   const { status } = useAuth();
@@ -102,6 +104,8 @@ export default function App() {
             <Route path="/vulnerabilities" element={<VulnerabilitiesList />} />
             <Route path="/vulnerabilities/:vid" element={<VulnerabilityDetail />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/compliance" element={<Compliance />} />
+            <Route path="/tools" element={<ToolHealth />} />
           </Route>
         </Route>
 

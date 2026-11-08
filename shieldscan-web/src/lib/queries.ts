@@ -33,6 +33,9 @@ import type {
   ReportManifest,
   PublicScanCreateResponse,
   PublicScanResult,
+  FrameworkCatalog,
+  OrgPostureResponse,
+  ToolHealthResponse,
 } from "./types";
 
 export const keys = {
@@ -453,5 +456,30 @@ export function useQuickScanResult(slug: string) {
     retry: false,
     refetchInterval: (q) =>
       q.state.data && ACTIVE_STATUSES.includes(q.state.data.status) ? 4_000 : false,
+  });
+}
+
+// ---------------------------------------------------------------- compliance + tool health
+
+export function useOrgPosture(orgId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "compliance", "posture"] as const,
+    queryFn: () => api<OrgPostureResponse>(`/v1/orgs/${orgId}/compliance/posture`),
+  });
+}
+
+export function useFrameworkCatalog(orgId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "compliance", "frameworks"] as const,
+    queryFn: () => api<FrameworkCatalog>(`/v1/orgs/${orgId}/compliance/frameworks`),
+    staleTime: 60 * 60_000,
+  });
+}
+
+export function useToolHealth(orgId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "tools", "health"] as const,
+    queryFn: () => api<ToolHealthResponse>(`/v1/orgs/${orgId}/tools/health`),
+    refetchInterval: 30_000,
   });
 }

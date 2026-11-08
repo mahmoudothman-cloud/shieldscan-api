@@ -349,3 +349,46 @@ export interface PublicScanResult {
   hidden_count: number;
   register_url: string;
 }
+
+export type ControlState = "pass" | "fail" | "not_assessed";
+
+export interface PostureSummary {
+  pass: number;
+  fail: number;
+  not_assessed: number;
+  total: number;
+}
+
+export interface FrameworkPosture {
+  slug: string;
+  name: string;
+  version: string;
+  controls: Array<{ control_id: string; title: string; state: ControlState }>;
+  summary: PostureSummary;
+}
+
+export interface OrgPostureResponse {
+  organization_id: string;
+  frameworks: FrameworkPosture[];
+}
+
+export interface FrameworkCatalog {
+  frameworks: Array<{
+    slug: string;
+    name: string;
+    version: string;
+    controls: Array<{ control_id: string; title: string; description: string | null }>;
+  }>;
+}
+
+export interface ToolHealthResponse {
+  workers: Array<{
+    worker_id: string | null;
+    hostname: string | null;
+    concurrency: number | null;
+    last_seen: string | null;
+    engines: string[];
+  }>;
+  tools: Array<{ engine: string; available: boolean; live_worker_count: number }>;
+  checked_at: string;
+}

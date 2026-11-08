@@ -198,6 +198,34 @@ async def test_org_posture_aggregate(client, db_session, compliance_org):
 
 
 @pytest.mark.asyncio
+async def test_org_posture_ignores_non_open_vulnerabilities(
+    client, db_session, compliance_org
+):
+    """M11: resolved / false-positive / accepted-risk rows no longer fail a
+    control; only open work counts."""
+    from app.models.vulnerabilities import VulnerabilityStatus
+
+    org, project, scan, headers = compliance_org
+    await use_org(db_session, org.id)
+    vuln = await add_vulnerability(db_session, scan, org, project, cwe_id="CWE-89")
+    vuln.status = VulnerabilityStatus.RESOLVED
+    await db_session.commit()
+
+    r = await client.get(f"/v1/orgs/{org.id}/compliance/posture", headers=headers)
+    assert r.status_code == 200
+    by_slug = {f["slug"]: f for f in r.json()["frameworks"]}
+    soc2_states = {c["control_id"]: c["state"] for c in by_slug["soc2"]["controls"]}
+    assert soc2_states["CC6.1"] == "pass"
+
+    vuln.status = VulnerabilityStatus.OPEN
+    await db_session.commit()
+    r = await client.get(f"/v1/orgs/{org.id}/compliance/posture", headers=headers)
+    soc2_states = {c["control_id"]: c["state"] for c in
+                   {f["slug"]: f for f in r.json()["frameworks"]}["soc2"]["controls"]}
+    assert soc2_states["CC6.1"] == "fail"
+
+
+@pytest.mark.asyncio
 async def test_org_posture_cross_tenant_isolated(
     client, db_session, compliance_org, other_org_headers
 ):

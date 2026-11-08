@@ -26,7 +26,7 @@ from app.models.compliance import (
     ComplianceFramework,
     CweControlMapping,
 )
-from app.models.vulnerabilities import Vulnerability
+from app.models.vulnerabilities import Vulnerability, VulnerabilityStatus
 
 
 class ControlState(str, Enum):
@@ -138,16 +138,23 @@ async def compute_scan_posture(
 
 
 async def compute_org_posture(*, db: AsyncSession, org_id: UUID) -> dict:
-    """Org-wide worst-state-per-control aggregate across all the org's scans.
+    """Org-wide worst-state-per-control aggregate.
 
-    A control fails org-wide iff any of the org's vulnerabilities maps to it —
-    the worst-state aggregate collapses to a single org-wide CWE set.
+    A control fails org-wide iff any of the org's OPEN vulnerabilities maps to
+    it — the worst-state aggregate collapses to a single org-wide CWE set.
+
+    Only ``status == open`` counts (M11): a control must stop failing once the
+    team resolves the finding or marks it a false positive, otherwise the
+    posture page can never show progress and "accepted risk" has no meaning.
+    All scans still contribute (an open row on an older scan is still open
+    work); cross-scan dedup is the follow-up logged in DRIFT-LOG 2026-11-07.
     """
     org_cwes = set(
         (
             await db.execute(
                 select(Vulnerability.cwe_id).where(
                     Vulnerability.organization_id == org_id,
+                    Vulnerability.status == VulnerabilityStatus.OPEN,
                     Vulnerability.cwe_id.is_not(None),
                 )
             )
