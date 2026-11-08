@@ -32,3 +32,36 @@ jobs:
 
       - name: Run tests
         run: poetry run pytest -v
+
+  web:
+    # shieldscan-web (React dashboard). Runs on every push so a broken
+    # build never reaches the box; the deploy step on the box runs the
+    # same three commands.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: shieldscan-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: shieldscan-web/.nvmrc
+          cache: npm
+          cache-dependency-path: shieldscan-web/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint (eslint + prettier)
+        run: npm run lint
+
+      - name: Test (vitest)
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
