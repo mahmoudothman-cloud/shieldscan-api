@@ -255,3 +255,40 @@ export interface VulnerabilityHistoryItem {
   notes: string | null;
   created_at: string;
 }
+
+export interface MemberItem {
+  user_id: string;
+  email: string;
+  full_name: string;
+  role: "admin" | "member" | "viewer";
+  email_verified: boolean;
+  joined_at: string;
+}
+
+export interface MemberInviteResponse extends MemberItem {
+  invited_new_user: boolean;
+}
+
+export interface OrgPatchInput {
+  name?: string;
+  industry?: string | null;
+  country?: string | null;
+  company_size?: string | null;
+}
+
+export interface APIKeySummary {
+  id: string;
+  name: string;
+  key_prefix: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface APIKeyCreatedResponse {
+  id: string;
+  name: string;
+  key_prefix: string;
+  plaintext_key: string;
+  created_at: string;
+}

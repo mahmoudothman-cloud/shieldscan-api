@@ -34,7 +34,7 @@ const NAV: NavItem[] = [
   { to: "/vulnerabilities", label: "Vulnerabilities", icon: ShieldAlert, ready: true },
   { to: "/compliance", label: "Compliance", icon: ClipboardCheck, ready: false },
   { to: "/tools", label: "Tool health", icon: Wrench, ready: false },
-  { to: "/settings", label: "Settings", icon: Settings, ready: false },
+  { to: "/settings", label: "Settings", icon: Settings, ready: true },
 ];
 
 export function AppShell() {

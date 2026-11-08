@@ -23,6 +23,11 @@ import type {
   VulnerabilityDetail,
   VulnerabilityHistoryItem,
   VulnerabilityStatus,
+  APIKeyCreatedResponse,
+  APIKeySummary,
+  MemberInviteResponse,
+  MemberItem,
+  OrgPatchInput,
 } from "./types";
 
 export const keys = {
@@ -297,5 +302,82 @@ export function useUpdateVulnerabilityStatus(orgId: string, vid: string) {
         body: input,
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+// ---------------------------------------------------------------- settings: org, members, API keys
+
+export function useUpdateOrg(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: OrgPatchInput) =>
+      api<OrgResponse>(`/v1/orgs/${orgId}`, { method: "PATCH", body: input }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.org(orgId) });
+      void qc.invalidateQueries({ queryKey: ["auth", "me"] });
+    },
+  });
+}
+
+export function useMembers(orgId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "members"] as const,
+    queryFn: () => api<MemberItem[]>(`/v1/orgs/${orgId}/members`),
+  });
+}
+
+export function useInviteMember(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { email: string; role: MemberItem["role"]; full_name?: string }) =>
+      api<MemberInviteResponse>(`/v1/orgs/${orgId}/members`, { method: "POST", body: input }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: [...keys.org(orgId), "members"] }),
+  });
+}
+
+export function useChangeMemberRole(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { userId: string; role: MemberItem["role"] }) =>
+      api<MemberItem>(`/v1/orgs/${orgId}/members/${input.userId}`, {
+        method: "PATCH",
+        body: { role: input.role },
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+export function useRemoveMember(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (userId: string) =>
+      api<null>(`/v1/orgs/${orgId}/members/${userId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+export const API_KEYS_KEY = ["auth", "api-keys"] as const;
+
+export function useApiKeys() {
+  return useQuery({
+    queryKey: API_KEYS_KEY,
+    queryFn: () => api<APIKeySummary[]>("/v1/auth/api-keys"),
+  });
+}
+
+export function useCreateApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) =>
+      api<APIKeyCreatedResponse>("/v1/auth/api-keys", { method: "POST", body: { name } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: API_KEYS_KEY }),
+  });
+}
+
+export function useRevokeApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (keyId: string) => api<null>(`/v1/auth/api-keys/${keyId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: API_KEYS_KEY }),
   });
 }
