@@ -31,6 +31,8 @@ import type {
   ExecutiveReportResponse,
   PdfReportResponse,
   ReportManifest,
+  PublicScanCreateResponse,
+  PublicScanResult,
 } from "./types";
 
 export const keys = {
@@ -428,5 +430,28 @@ export function useDownloadInline(orgId: string, scanId: string) {
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
     },
+  });
+}
+
+// ---------------------------------------------------------------- public quick scan (anonymous)
+
+export function useCreateQuickScan() {
+  return useMutation({
+    mutationFn: (input: { target_url: string; email: string; consent: true }) =>
+      api<PublicScanCreateResponse>("/v1/public/quick-scans", {
+        method: "POST",
+        body: input,
+        anonymous: true,
+      }),
+  });
+}
+
+export function useQuickScanResult(slug: string) {
+  return useQuery({
+    queryKey: ["public", "quick-scan", slug] as const,
+    queryFn: () => api<PublicScanResult>(`/v1/public/quick-scans/${slug}`, { anonymous: true }),
+    retry: false,
+    refetchInterval: (q) =>
+      q.state.data && ACTIVE_STATUSES.includes(q.state.data.status) ? 4_000 : false,
   });
 }

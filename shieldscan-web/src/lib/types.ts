@@ -314,3 +314,38 @@ export interface ExecutiveReportResponse {
   executive_summary: string | null;
   generated_at: string;
 }
+
+export interface PublicScanCreateResponse {
+  slug: string;
+  status: string;
+  target_url: string;
+  result_url: string;
+  estimated_seconds: number;
+  expires_at: string;
+}
+
+export interface PublicFinding {
+  title: string;
+  severity: Severity;
+  engine: string;
+  summary: string | null;
+  target_url: string | null;
+}
+
+export interface PublicScanResult {
+  slug: string;
+  status: ScanStatus | "expired";
+  target_url: string;
+  domain: string;
+  created_at: string;
+  completed_at: string | null;
+  expires_at: string;
+  engines_total: number;
+  engines_finished: number;
+  score: number | null;
+  grade: string | null;
+  findings_by_severity: Record<Severity, number> & { total: number };
+  findings: PublicFinding[];
+  hidden_count: number;
+  register_url: string;
+}

@@ -25,6 +25,8 @@ const VulnerabilitiesList = lazy(() => import("@/pages/vulnerabilities/Vulnerabi
 const VulnerabilityDetail = lazy(() => import("@/pages/vulnerabilities/VulnerabilityDetail"));
 const Settings = lazy(() => import("@/pages/settings/Settings"));
 const ScanReport = lazy(() => import("@/pages/reports/ScanReport"));
+const QuickScanLanding = lazy(() => import("@/pages/public/QuickScanLanding"));
+const QuickScanResult = lazy(() => import("@/pages/public/QuickScanResult"));
 
 function RequireAuth() {
   const { status } = useAuth();
@@ -43,6 +45,14 @@ function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Anonymous visitors get the quick-scan landing; signed-in users their dashboard. */
+function Home() {
+  const { status } = useAuth();
+  if (status === "booting") return <Spinner />;
+  if (status === "authenticated") return <Navigate to="/dashboard" replace />;
+  return <QuickScanLanding />;
+}
+
 function NotFound() {
   return (
     <div className="p-10 text-center text-sm text-ink-3">
@@ -56,7 +66,9 @@ export default function App() {
   return (
     <Suspense fallback={<Spinner />}>
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<Home />} />
+        <Route path="/quick-scan" element={<QuickScanLanding />} />
+        <Route path="/q/:slug" element={<QuickScanResult />} />
 
         <Route
           path="/login"
