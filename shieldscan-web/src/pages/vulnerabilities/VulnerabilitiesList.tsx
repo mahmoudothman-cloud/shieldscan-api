@@ -171,7 +171,7 @@ export default function VulnerabilitiesList() {
                   <th className="pb-2">Layer</th>
                   <th className="pb-2">Status</th>
                   <th className="pb-2 text-right">Score</th>
-                  <th className="pb-2 text-right">Found</th>
+                  <th className="pb-2 text-right">First seen</th>
                 </tr>
               </thead>
               <tbody className={cx(vulns.isPlaceholderData && "opacity-60")}>
@@ -189,6 +189,16 @@ export default function VulnerabilitiesList() {
                       </Link>
                       <div className="text-xs text-ink-3">
                         {v.cwe_id ?? "no CWE"}
+                        {v.regression && (
+                          <span className="ml-2 rounded-full bg-critical-wash px-1.5 text-critical">
+                            back after being resolved
+                          </span>
+                        )}
+                        {v.superseded_by_id && (
+                          <span className="ml-2 rounded-full bg-wash-2 px-1.5 text-ink-3">
+                            older copy
+                          </span>
+                        )}
                         {v.corroborated_count >= 2 && (
                           <span className="ml-2 rounded-full bg-brand-wash px-1.5 text-brand">
                             confirmed by {v.corroborated_count} engines
@@ -201,7 +211,9 @@ export default function VulnerabilitiesList() {
                     <td className="py-2.5 text-right tabular-nums">
                       {v.severity_score?.toFixed(1) ?? "—"}
                     </td>
-                    <td className="py-2.5 text-right text-ink-3">{relTime(v.created_at)}</td>
+                    <td className="py-2.5 text-right text-ink-3" title="first seen">
+                      {relTime(v.first_seen_at ?? v.created_at)}
+                    </td>
                   </tr>
                 ))}
               </tbody>

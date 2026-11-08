@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.raw_findings import EngineCategory, RawFinding, Severity
 from app.models.scans import Scan
-from app.models.vulnerabilities import Vulnerability
+from app.models.vulnerabilities import Vulnerability, VulnerabilityStatus
 from app.services.ai.clients import get_anthropic_client
 from app.services.ai.cost_tracking import (
     RESERVED_SUMMARY_BUDGET_USD,
@@ -429,7 +429,30 @@ async def _generate_fixes(*, db: AsyncSession, scan_id: UUID) -> None:
         for v in vulnerabilities
         if v.ai_fix_text is None  # Q7 A idempotency
         and v.severity != Severity.INFO  # observations, not remediable defects
+        # M11: a status carried over from the previous scan (false positive /
+        # accepted risk) needs no fix; the previous row's fix text is reused.
+        and v.status == VulnerabilityStatus.OPEN
     ]
+    # Reuse the previous scan's fix for continued issues (same issue, same
+    # fix) instead of paying for it again.
+    continued = [v for v in vulnerabilities if v.previous_id is not None and v.ai_fix_text is None]
+    if continued:
+        prev_rows = {
+            r.id: r
+            for r in (
+                await db.execute(
+                    select(Vulnerability).where(
+                        Vulnerability.id.in_([v.previous_id for v in continued])
+                    )
+                )
+            ).scalars()
+        }
+        for v in continued:
+            prev = prev_rows.get(v.previous_id)
+            if prev is not None and prev.ai_fix_text and not prev.ai_fix_is_fallback:
+                v.ai_fix_text = prev.ai_fix_text
+                v.ai_fix_is_fallback = False
+        pending = [v for v in pending if v.ai_fix_text is None]
     if not pending:
         return
     pending.sort(key=lambda v: v.severity_score or 0.0, reverse=True)  # Q6 C

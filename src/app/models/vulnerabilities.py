@@ -84,6 +84,37 @@ class Vulnerability(Base, TimestampMixin, TenantMixin):
     # Dedup identity (may repeat across scans — used by scan comparison)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
+    # Cross-scan identity (M11; DRIFT-LOG 2026-11-07 follow-up). Every scan
+    # still creates its own Vulnerability rows; these columns link a row
+    # to the SAME issue as found by the previous scan of the project, so
+    # status carries forward and "open" is counted once per issue:
+    #   previous_id       → the row this one continues (older scan)
+    #   superseded_by_id  → the newer row that continues this one; a
+    #                       superseded row is history and is excluded from
+    #                       open counts, lists and posture by default
+    #   first_seen_at     → copied along the chain: when the issue was
+    #                       first found, not when this scan ran
+    #   regression        → the previous row was RESOLVED and the issue is
+    #                       back ("fixed" did not hold)
+    # See services/vulnerability_identity.py for the matching rule.
+    previous_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("vulnerabilities.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    superseded_by_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("vulnerabilities.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    first_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    regression: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
+
     # Status + assignment
     status: Mapped[VulnerabilityStatus] = mapped_column(
         Enum(VulnerabilityStatus, name="vulnerability_status"),

@@ -155,6 +155,7 @@ async def compute_org_posture(*, db: AsyncSession, org_id: UUID) -> dict:
                 select(Vulnerability.cwe_id).where(
                     Vulnerability.organization_id == org_id,
                     Vulnerability.status == VulnerabilityStatus.OPEN,
+                    Vulnerability.superseded_by_id.is_(None),
                     Vulnerability.cwe_id.is_not(None),
                 )
             )

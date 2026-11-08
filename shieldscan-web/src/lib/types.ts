@@ -209,6 +209,10 @@ export interface VulnerabilityListItem {
   corroborated_count: number;
   scan_id: string;
   created_at: string;
+  first_seen_at: string | null;
+  previous_id: string | null;
+  superseded_by_id: string | null;
+  regression: boolean;
 }
 
 export interface VulnerabilityDetail extends VulnerabilityListItem {

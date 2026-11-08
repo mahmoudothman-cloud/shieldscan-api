@@ -213,8 +213,23 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     try:
         yield session
     finally:
+        # Let the request path's fire-and-forget tasks (api_keys.last_used_at)
+        # finish on THIS loop before it closes; otherwise a half-run statement
+        # keeps a lock that the next test's drop_all waits on forever.
+        from app.dependencies import drain_background_tasks
+
+        await drain_background_tasks()
         await session.close()
         await connection.close()
+        # app.db.engine is module-level and outlives this test's event loop;
+        # asyncpg connections are bound to the loop that created them, so a
+        # pooled connection reused on a later loop never reads its socket and
+        # a background UPDATE on it blocks the next drop_all forever. Discard
+        # the pool (without closing on a foreign loop) so each test's first
+        # use creates connections on its own loop.
+        from app.db import engine as _app_db_engine
+
+        await _app_db_engine.dispose(close=False)
     await app_engine.dispose()
 
 

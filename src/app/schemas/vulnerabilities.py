@@ -34,6 +34,11 @@ class VulnerabilityListItem(BaseModel):
     corroborated_count: int
     scan_id: UUID
     created_at: datetime
+    # Cross-scan identity (M11)
+    first_seen_at: datetime | None = None
+    previous_id: UUID | None = None
+    superseded_by_id: UUID | None = None
+    regression: bool = False
 
 
 class VulnerabilityDetail(VulnerabilityListItem):

@@ -73,8 +73,8 @@ async def rich_org(client, db_session):
     await _mk_vuln(db_session, org, s_done, p_ok, Severity.MEDIUM)
     await _mk_vuln(db_session, org, s_part, p_ok, Severity.HIGH)
     await _mk_vuln(db_session, org, s_part, p_ok, Severity.LOW)
-    # Open MEDIUM on the OLDER scan of the same project: must NOT count
-    # (latest-finished-scan-per-project scoping).
+    # Open MEDIUM on the OLDER scan of the same project that the newer scan
+    # superseded (same issue, cross-scan identity): must NOT count.
     await _mk_vuln(db_session, org, s_part, p_ok, Severity.MEDIUM)
     # Open HIGH on the archived project's only scan: must NOT count either.
     s_arch = await _mk_scan(db_session, org, p_arch, status=ScanStatus.COMPLETED)
@@ -93,6 +93,8 @@ async def rich_org(client, db_session):
     hi_part.status = VulnerabilityStatus.RESOLVED
     low_part = await db_session.get(Vulnerability, ids[(Severity.LOW, s_part.id)])
     low_part.status = VulnerabilityStatus.FALSE_POSITIVE
+    med_part = await db_session.get(Vulnerability, ids[(Severity.MEDIUM, s_part.id)])
+    med_part.superseded_by_id = ids[(Severity.MEDIUM, s_done.id)]
 
     await db_session.commit()
     await db_session.refresh(s_done)
@@ -138,10 +140,10 @@ async def test_summary_populated_org(client, rich_org):
     # deliberately include archived projects' history.)
     assert body["scans"] == {"total": 7, "active": 2, "completed_30d": 3}
 
-    # Open, on each live project's latest finished scan only: critical 1
-    # (corroborated), high 1, medium 1. Excluded: the resolved high and
-    # false-positive low; the open medium on the OLDER scan of the same
-    # project; the open high on the archived project.
+    # Open, once per issue, live projects only: critical 1 (corroborated),
+    # high 1, medium 1. Excluded: the resolved high and false-positive low;
+    # the older scan's medium that the newer copy superseded; the open high
+    # on the archived project.
     assert body["open_vulnerabilities"] == {
         "critical": 1, "high": 1, "medium": 1, "low": 0, "info": 0,
         "total": 3, "corroborated": 1,

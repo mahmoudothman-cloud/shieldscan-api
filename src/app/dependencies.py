@@ -344,10 +344,32 @@ async def _update_api_key_last_used(key_id: UUID, when: datetime) -> None:
         logger.error("api_key last_used_at update failed for %s: %s", key_id, e)
 
 
+# Fire-and-forget tasks are tracked so (a) the event loop keeps a strong
+# reference (asyncio only holds weak refs to tasks) and (b) a test or a
+# graceful shutdown can wait for them. A task left pending when its loop
+# closes keeps a connection mid-statement, which in the test harness holds
+# a lock on api_keys that the next fixture's DROP TABLE waits on forever.
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+def _schedule_background(coro: Awaitable[None]) -> asyncio.Task[None]:
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+async def drain_background_tasks(timeout: float = 5.0) -> None:
+    """Wait for pending fire-and-forget tasks (tests, shutdown hooks)."""
+    pending = [t for t in _background_tasks if not t.done()]
+    if pending:
+        await asyncio.wait(pending, timeout=timeout)
+
+
 def _maybe_schedule_last_used_update(
     key: APIKey,
     *,
-    scheduler: Callable[[Awaitable[None]], object] = asyncio.create_task,
+    scheduler: Callable[[Awaitable[None]], object] = _schedule_background,
     now: datetime | None = None,
 ) -> bool:
     """If the key's last_used_at is stale (>60s) or None, schedule a
@@ -355,7 +377,7 @@ def _maybe_schedule_last_used_update(
     (so tests can assert on the debounce).
 
     ``scheduler`` is injected for testability — the default is
-    ``asyncio.create_task`` (fire-and-forget); tests pass a list's
+    ``_schedule_background`` (tracked fire-and-forget); tests pass a list's
     ``append`` to capture the coroutine without actually running it.
     """
     _now = now if now is not None else datetime.now(timezone.utc)

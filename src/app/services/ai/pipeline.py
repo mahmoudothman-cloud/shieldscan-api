@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.raw_findings import RawFinding
 from app.models.scans import Scan
 from app.models.vulnerabilities import Vulnerability
+from app.services.vulnerability_identity import reconcile_scan_history
 from app.services.ai.clients import get_openai_client, get_qdrant_client
 from app.services.ai.correlation import (
     CORRELATION_THRESHOLD,
@@ -543,6 +544,10 @@ async def run(*, db: AsyncSession, scan_id: UUID) -> None:
     # Sequential composition; both operate on the Vulnerabilities promoted above.
     await _correlate_vulnerabilities(db=db, scan_id=scan_id)
     await _score_vulnerabilities(db=db, scan_id=scan_id)
+    # M11: link to the project's history — carry triage status forward,
+    # supersede older copies, flag regressions, auto-resolve what this scan
+    # proves fixed. Before fix-gen so a carried false positive is not paid for.
+    await reconcile_scan_history(db, scan)
     # M9.C (ADR-032 Q13): generate per-vuln AI fixes (Path A), then the scan
     # executive summary. Sequential; both read the scored Vulnerabilities above and
     # write ai_fix_text / executive_summary within this same transaction.

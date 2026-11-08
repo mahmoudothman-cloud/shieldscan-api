@@ -118,6 +118,7 @@ from app.models.recon import AttackSurface, SubdomainStatus
 from app.db.tenant_context import set_tenant_context
 from app.models.scans import Scan, ScanJob, ScanStatus
 from app.schemas.raw_findings import RawFindingCreate
+from app.services.vulnerability_identity import reconcile_scan_history
 from app.services.audit import ScanAction, audit
 
 logger = logging.getLogger(__name__)
@@ -1048,6 +1049,10 @@ class CompletionsConsumer:
                 ScanStatus.COMPLETED if all_ok else ScanStatus.PARTIAL
             )
             scan.completed_at = datetime.now(timezone.utc)
+            # M11: a clean scan is still evidence — older open issues this
+            # scan covered are auto-resolved (the pipeline path does the
+            # same after promotion). No-op for public scans.
+            await reconcile_scan_history(db, scan)
             await db.flush()
             finding_count_total = sum(j.finding_count or 0 for j in sibling_jobs)
             await audit(

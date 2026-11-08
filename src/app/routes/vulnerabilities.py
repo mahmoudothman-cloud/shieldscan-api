@@ -92,6 +92,7 @@ async def _paginated_list(
     engine_category: str | None,
     scan_id: UUID | None = None,
     project_id: UUID | None = None,
+    include_superseded: bool = True,
 ) -> PaginatedVulnerabilitiesResponse:
     """Shared query-builder for the per-scan + org-wide lists (Q1/Q2/Q3)."""
     descending = sort.startswith("-")
@@ -100,6 +101,8 @@ async def _paginated_list(
         raise HTTPException(status_code=422, detail=f"invalid sort key: {sort_key}")
 
     base_where = [Vulnerability.organization_id == org_id]
+    if not include_superseded:
+        base_where.append(Vulnerability.superseded_by_id.is_(None))
     severities = _parse_csv_enum(severity, Severity, "severity")
     if severities:
         base_where.append(Vulnerability.severity.in_(severities))
@@ -200,11 +203,20 @@ async def list_vulnerabilities(
     engine_category: str | None = Query(None),
     scan_id: UUID | None = Query(None),
     project_id: UUID | None = Query(None),
+    include_superseded: bool = Query(
+        False,
+        description=(
+            "Include rows a newer scan has superseded (same issue, older copy). "
+            "Off by default so each issue appears once; the per-scan list under "
+            "/scans/{scan_id}/vulnerabilities always shows that scan's own rows."
+        ),
+    ),
 ):
     return await _paginated_list(
         db, org_id=org_id, page=page, per_page=per_page, sort=sort,
         severity=severity, status=status, engine_category=engine_category,
         scan_id=scan_id, project_id=project_id,
+        include_superseded=include_superseded or scan_id is not None,
     )
 
 

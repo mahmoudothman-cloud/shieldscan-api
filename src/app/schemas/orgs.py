@@ -30,10 +30,9 @@ class ScanCounts(BaseModel):
 
 
 class OpenVulnerabilityCounts(BaseModel):
-    """Vulnerabilities with status ``open`` on each live project's latest
-    finished scan — the work still to do on the targets as they are now.
-    Older scans' copies of the same issues are not counted (no cross-scan
-    dedup yet; see DRIFT-LOG 2026-11-07)."""
+    """Vulnerabilities with status ``open`` on live projects, counted once
+    per issue: a newer scan's copy supersedes the older one (cross-scan
+    identity, services/vulnerability_identity.py)."""
 
     critical: int = 0
     high: int = 0
