@@ -185,6 +185,13 @@ def _build_config_block(scan: Scan) -> dict:
     depth_default = _DEPTH_FOR_SCAN_TYPE.get(scan.scan_type)
     if depth_default is not None and "depth" not in block:
         block["depth"] = depth_default
+    # M13: QUICK means the same thing everywhere — the passive template set
+    # the public endpoint runs (headers, cookies, exposures, TLS, DNS,
+    # fingerprints) with no severity filter. The old "quick" depth
+    # (high/critical only) returned 0 findings on Juice Shop while the
+    # public scan of the same host returned 19. Caller-supplied values win.
+    if scan.scan_type == ScanType.QUICK and "template_categories" not in block:
+        block["template_categories"] = list(QUICK_TEMPLATE_TAGS)
     return block
 
 
@@ -212,8 +219,12 @@ _SOURCE_REQUIRING_SCAN_TYPES: frozenset[ScanType] = frozenset({
 # scan.config carried (caller-supplied or empty). Per-scan
 # scan.config wins over the default — operators can still tune.
 _DEPTH_FOR_SCAN_TYPE: Final[dict[ScanType, str]] = {
-    ScanType.QUICK: "quick",
+    ScanType.QUICK: "deep",  # no severity filter; the tag set below bounds the run
 }
+
+# Nuclei template tags for a quick scan (engine maps them to -tags). Shared
+# with services/public_scans.py so in-app and public quick scans agree.
+QUICK_TEMPLATE_TAGS: Final[tuple[str, ...]] = ("misconfig", "exposure", "ssl", "dns", "tech")
 
 
 # M8.1β.2 ADR-028 recon-first architecture (SPEC §13; design doc

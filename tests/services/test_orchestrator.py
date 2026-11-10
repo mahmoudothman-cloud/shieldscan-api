@@ -783,8 +783,9 @@ async def _seed_attack_surface(db_session, scan, org, url="https://api.q.example
 async def test_dispatch_quick_phase2_injects_depth_quick_default(
     quick_scan, db_session, fake_redis
 ):
-    """QUICK ScanType injects depth="quick" into the wire config block
-    of PHASE-2 tool jobs when caller did NOT supply scan.config["depth"].
+    """QUICK ScanType injects depth="deep" + the passive template tags into
+    the wire config block of PHASE-2 tool jobs when the caller did NOT
+    supply them.
     Per M8.1β.1 engine-variant resolution (SPEC §13 ADR-022 continuation)
     composed with M8.1β.2 ADR-028 two-phase dispatch: nuclei depth knob
     flows through _build_config_block at phase-2."""
@@ -808,11 +809,18 @@ async def test_dispatch_quick_phase2_injects_depth_quick_default(
         assert item is not None
         queued.append(json.loads(item[1]))
     for q in queued:
-        assert q["config"].get("depth") == "quick", (
+        # M13: QUICK = passive template set with no severity filter, the
+        # same config the public endpoint sends (see orchestrator
+        # QUICK_TEMPLATE_TAGS). The old depth="quick" hid everything
+        # below high.
+        assert q["config"].get("depth") == "deep", (
             f"engine={q['engine']} phase-2 payload config must carry "
-            f"depth='quick' per _DEPTH_FOR_SCAN_TYPE[QUICK]; got "
+            f"depth='deep' per _DEPTH_FOR_SCAN_TYPE[QUICK]; got "
             f"{q['config']!r}"
         )
+        assert q["config"].get("template_categories") == [
+            "misconfig", "exposure", "ssl", "dns", "tech",
+        ]
 
 
 @pytest.mark.asyncio
@@ -822,7 +830,7 @@ async def test_dispatch_quick_phase2_caller_supplied_depth_wins(
     """Caller-supplied scan.config["depth"] takes precedence over the
     _DEPTH_FOR_SCAN_TYPE default at phase-2. Operator-tuning preserved."""
     s = quick_scan
-    s["scan"].config = {"depth": "deep"}
+    s["scan"].config = {"depth": "standard"}
     await db_session.commit()
     await db_session.refresh(s["scan"])
     s["scan"].project = s["project"]  # type: ignore[attr-defined]
@@ -841,7 +849,7 @@ async def test_dispatch_quick_phase2_caller_supplied_depth_wins(
         assert item is not None
         queued.append(json.loads(item[1]))
     for q in queued:
-        assert q["config"].get("depth") == "deep", (
+        assert q["config"].get("depth") == "standard", (
             "caller-supplied depth MUST win over _DEPTH_FOR_SCAN_TYPE "
             "default at phase-2"
         )

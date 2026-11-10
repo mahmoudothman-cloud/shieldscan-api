@@ -45,7 +45,7 @@ from app.schemas.public_scans import (
     PublicScanResultResponse,
     PublicSeverityCounts,
 )
-from app.services.orchestrator import ScanOrchestrator
+from app.services.orchestrator import QUICK_TEMPLATE_TAGS, ScanOrchestrator
 from app.services.projects import extract_root_domain
 
 SEVERITY_PENALTY: dict[Severity, int] = {
@@ -58,14 +58,10 @@ SEVERITY_PENALTY: dict[Severity, int] = {
 _SEVERITY_RANK: dict[Severity, int] = {s: i for i, s in enumerate(Severity)}
 _TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "canceled"})
 
-# Nuclei template tags for the free scan: passive, read-only checks —
-# security headers / cookies / CSP (misconfig), exposed files, panels
-# and keys (exposure), TLS and DNS posture, technology fingerprints.
-# Sent as config.template_categories → engine "-tags". Depth "deep"
-# turns the severity filter off: the headline findings of a passive
-# scan are low/medium, which the QUICK default ("quick" → high,critical
-# only) would hide — a Juice Shop quick scan graded "A, 0 findings".
-PUBLIC_SCAN_TEMPLATE_TAGS: tuple[str, ...] = ("misconfig", "exposure", "ssl", "dns", "tech")
+# Same passive set as every QUICK scan (orchestrator.QUICK_TEMPLATE_TAGS);
+# depth "deep" turns the severity filter off so low/medium header and
+# cookie findings — the point of a passive scan — are not hidden.
+PUBLIC_SCAN_TEMPLATE_TAGS: tuple[str, ...] = QUICK_TEMPLATE_TAGS
 PUBLIC_SCAN_DEPTH = "deep"
 _FINISHED_SCAN_STATUSES = frozenset({ScanStatus.COMPLETED, ScanStatus.PARTIAL})
 
