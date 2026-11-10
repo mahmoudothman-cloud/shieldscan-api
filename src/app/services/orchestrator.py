@@ -299,6 +299,11 @@ class ScanOrchestrator:
             # Public quick scans probe the exact URL the requester typed
             # (path included); the system-org project only groups them.
             target_url = (scan.config or {}).get("target_url") or target_url
+        # Persist the EFFECTIVE config (caller values + scan-type defaults) on
+        # the scan so "what did this scan look for" is answerable later —
+        # vulnerability_identity.py refuses to auto-resolve an issue when the
+        # new scan's scope is narrower than the scan that found it.
+        scan.config = _build_config_block(scan)
 
         if scan.scan_type in _WEB_SCAN_TYPES and not scan.is_public:
             # M8.1β.2 ADR-028 Phase-1: dispatch a SINGLE recon ScanJob
