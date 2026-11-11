@@ -90,6 +90,7 @@ from app.schemas.scan_compare import (
 )
 from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
+from app.services.plans import get_effective_limits, record_scan_usage
 from app.services.scan_compare import compute_diff
 from app.services.scan_queue import (
     ProgressSubscriber,
@@ -260,6 +261,12 @@ async def create_scan(
     )
     db.add(scan)
     await db.flush()
+
+    # Step 6b: meter the scan against the org's period (M12 slice 1).
+    # Same transaction as the Scan row: a dispatch failure rolls both
+    # back. Enforcement of the cap lands in slice 2.
+    eff = await get_effective_limits(db, redis, org_id)
+    await record_scan_usage(db, eff, org_id, scan.scan_type)
 
     # Step 7: eager-attach project in-memory so orchestrator's
     # synchronous scan.project.target_url access doesn't trigger

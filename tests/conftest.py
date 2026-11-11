@@ -193,6 +193,16 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
             await conn.execute(text(sql))
         for sql in app_role_upgrade_sql():
             await conn.execute(text(sql))
+        # Plan catalog seed (M12 slice 1): the migration seeds the same rows;
+        # registration and POST /scans need a live Free version to exist.
+        from datetime import datetime, timezone
+
+        from app.models.billing import Plan, PlanVersion
+        from app.services.plans import default_ladder_rows
+
+        plan_rows, version_rows = default_ladder_rows(datetime.now(timezone.utc))
+        await conn.execute(Plan.__table__.insert(), plan_rows)
+        await conn.execute(PlanVersion.__table__.insert(), version_rows)
 
     # The session is still bound to one connection so a test's GUC survives its
     # commits. Production does NOT pin a connection — TenantSession.after_begin

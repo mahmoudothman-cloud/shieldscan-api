@@ -46,6 +46,7 @@ from app.services.audit import AuthAction, audit
 from app.services.auth import hash_password
 from app.services.email import EmailService
 from app.services.email_verification import issue_email_verification_token
+from app.services.plans import ensure_free_subscription
 
 
 # ---------------------------------------------------------------- exceptions
@@ -205,6 +206,10 @@ async def register_identity(
             # Set tenant GUC for RLS on audit_logs + future tenant tables.
             # shieldscan_app role cannot write to audit_logs without this.
             await set_tenant_context(db, org.id)
+
+            # Every org carries exactly one live subscription; new orgs
+            # start on the live Free version (M12 slice 1).
+            await ensure_free_subscription(db, org.id)
 
             # User.
             user = User(
