@@ -82,6 +82,21 @@ class Settings(BaseSettings):
     # a bad catalog edit, a Redis outage that mis-resolves limits — and
     # for the test harness, where most orgs have no subscription row.
     PLAN_LIMITS_ENFORCED: bool = True
+    # M12 slice 4 — billing processor. "manual" = no online checkout (the
+    # platform admin assigns subscriptions); "paymob" = Paymob Accept
+    # (Egypt, EGP). Keys from the Paymob dashboard; test-mode keys on a
+    # staging deploy only. HMAC secret verifies transaction callbacks.
+    BILLING_PROVIDER: str = "manual"
+    BILLING_GRACE_DAYS: int = 7
+    BILLING_VAT_RATE_PERCENT: int = 14
+    PAYMOB_BASE_URL: str = "https://accept.paymob.com"
+    PAYMOB_API_KEY: str = ""
+    PAYMOB_SECRET_KEY: str = ""
+    PAYMOB_PUBLIC_KEY: str = ""
+    PAYMOB_HMAC_SECRET: str = ""
+    PAYMOB_CARD_INTEGRATION_ID: int = 0  # 3DS card integration (first payment, tokenises the card)
+    PAYMOB_MOTO_INTEGRATION_ID: int = 0  # MOTO integration (renewals on the saved token)
+    PAYMOB_WEBHOOK_URL: str = ""  # public URL of POST /v1/billing/webhooks/paymob
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

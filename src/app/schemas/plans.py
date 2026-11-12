@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -54,3 +54,49 @@ class BillingSummaryResponse(BaseModel):
     features: dict[str, Any]
     usage: dict[str, int]
     overrides: list[str]
+
+
+# ---------------------------------------------------------------- billing (M12 slice 4)
+
+
+class CheckoutRequest(BaseModel):
+    plan_code: str
+    billing_interval: str = "month"
+
+
+class CheckoutResponse(BaseModel):
+    subscription_id: UUID
+    checkout_url: str
+
+
+class InvoiceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    status: str
+    amount_cents: int
+    currency: str
+    vat_cents: int
+    period_start: date | None
+    period_end: date | None
+    paid_at: datetime | None
+    failure_reason: str | None
+    created_at: datetime
+
+
+class SubscriptionView(BaseModel):
+    """``GET /orgs/{id}/billing/subscription`` — what Settings → Billing
+    renders: the live row, whether online checkout exists, invoices."""
+
+    plan_code: str
+    plan_name: str
+    billing_interval: str
+    status: str
+    provider: str
+    current_period_start: date
+    current_period_end: date | None
+    cancel_at_period_end: bool
+    past_due_since: datetime | None
+    online_checkout: bool
+    pending_checkout: bool
+    invoices: list[InvoiceOut]

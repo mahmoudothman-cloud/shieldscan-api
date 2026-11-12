@@ -62,6 +62,7 @@ TENANT_TABLES: tuple[str, ...] = (
     "org_subscriptions",  # M12 slice 1 — one live subscription per org
     "org_limit_overrides",  # M12 slice 1 — per-org limit/feature bumps
     "usage_counters",  # M12 slice 1 — monthly meters
+    "invoices",  # M12 slice 4 — processor charges per org
 )
 
 

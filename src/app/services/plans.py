@@ -359,12 +359,16 @@ async def live_version(
 
 
 async def current_subscription(db: AsyncSession, org_id: UUID) -> OrgSubscription | None:
-    """The org's one non-canceled subscription, or None (→ Free)."""
+    """The org's one live subscription, or None (→ Free). PENDING rows
+    (a checkout that has not been paid) are not it: entitlement stays
+    with the previous row until the first payment activates the new one."""
     return (
         await db.execute(
             select(OrgSubscription).where(
                 OrgSubscription.organization_id == org_id,
-                OrgSubscription.status != SubscriptionStatus.CANCELED,
+                OrgSubscription.status.notin_(
+                    [SubscriptionStatus.CANCELED, SubscriptionStatus.PENDING]
+                ),
             )
         )
     ).scalar_one_or_none()

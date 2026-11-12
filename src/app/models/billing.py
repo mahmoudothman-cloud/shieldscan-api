@@ -145,12 +145,13 @@ class PlanVersion(Base, TimestampMixin):
 class OrgSubscription(Base, TimestampMixin, TenantMixin):
     __tablename__ = "org_subscriptions"
     __table_args__ = (
-        # Exactly one non-terminal subscription per org.
+        # Exactly one entitled-or-entitling subscription per org. PENDING
+        # (checkout started, unpaid) sits beside it until activation.
         Index(
             "uq_org_subscriptions_one_live",
             "organization_id",
             unique=True,
-            postgresql_where="status <> 'canceled'",
+            postgresql_where="status NOT IN ('canceled', 'pending')",
         ),
         Index("ix_org_subscriptions_provider_sub", "provider", "provider_subscription_id"),
     )
@@ -219,3 +220,77 @@ class UsageCounter(Base, TimestampMixin, TenantMixin):
     key: Mapped[str] = mapped_column(String(64), nullable=False)
     period_start: Mapped[date] = mapped_column(Date, nullable=False)
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class BillingEvent(Base, TimestampMixin):
+    """Idempotency ledger for processor webhooks (M12 slice 4). Global, not
+    tenant-scoped: an event arrives before the org is known. ``(provider,
+    event_id)`` is unique — a redelivered webhook is acknowledged and
+    skipped. ``outcome`` says what the handler did ("activated",
+    "renewed", "ignored_unmatched", ...), for the reconcile job and ops."""
+
+    __tablename__ = "billing_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "event_id", name="uq_billing_events_provider_event"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    provider: Mapped[BillingProviderName] = mapped_column(
+        Enum(
+            BillingProviderName,
+            name="billing_provider",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=False,
+    )
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    organization_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True, index=True
+    )
+    subscription_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    outcome: Mapped[str] = mapped_column(String(64), nullable=False, default="received")
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InvoiceStatus(str, PyEnum):
+    PAID = "paid"
+    FAILED = "failed"
+    REFUNDED = "refunded"
+
+
+class Invoice(Base, TimestampMixin, TenantMixin):
+    """One row per processor charge attempt (first payment, renewal,
+    refund). Gross amounts; VAT is inside (14%). Tenant-scoped: the org
+    sees its own invoices in Settings → Billing."""
+
+    __tablename__ = "invoices"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_transaction_id", name="uq_invoices_provider_txn"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
+    subscription_id: Mapped[UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("org_subscriptions.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[BillingProviderName] = mapped_column(
+        Enum(
+            BillingProviderName,
+            name="billing_provider",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=False,
+    )
+    provider_transaction_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[InvoiceStatus] = mapped_column(
+        Enum(InvoiceStatus, name="invoice_status", values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+    )
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="EGP")
+    vat_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

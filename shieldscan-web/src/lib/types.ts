@@ -538,3 +538,33 @@ export interface AdminOrgDetail {
   period_start: string;
   period_end: string | null;
 }
+
+// ---------------------------------------------------------------- billing (M12 slice 4)
+
+export interface InvoiceView {
+  id: string;
+  status: "paid" | "failed" | "refunded";
+  amount_cents: number;
+  currency: string;
+  vat_cents: number;
+  period_start: string | null;
+  period_end: string | null;
+  paid_at: string | null;
+  failure_reason: string | null;
+  created_at: string;
+}
+
+export interface SubscriptionView {
+  plan_code: string;
+  plan_name: string;
+  billing_interval: "month" | "year";
+  status: string;
+  provider: string;
+  current_period_start: string;
+  current_period_end: string | null;
+  cancel_at_period_end: boolean;
+  past_due_since: string | null;
+  online_checkout: boolean;
+  pending_checkout: boolean;
+  invoices: InvoiceView[];
+}

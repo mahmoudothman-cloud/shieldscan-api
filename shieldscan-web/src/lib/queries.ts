@@ -7,6 +7,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type {
+  SubscriptionView,
   AdminOrgDetail,
   AdminOrgList,
   AdminOverride,
@@ -604,6 +605,35 @@ export function useAssignSubscription(orgId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: adminKeys.org(orgId) });
       void qc.invalidateQueries({ queryKey: ["admin", "orgs"] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------- billing (M12 slice 4)
+
+export function useSubscription(orgId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "subscription"] as const,
+    queryFn: () => api<SubscriptionView>(`/v1/orgs/${orgId}/billing/subscription`),
+  });
+}
+
+export function useStartCheckout(orgId: string) {
+  return useMutation({
+    mutationFn: (input: { plan_code: string; billing_interval: "month" | "year" }) =>
+      api<{ subscription_id: string; checkout_url: string }>(`/v1/orgs/${orgId}/billing/checkout`, {
+        method: "POST",
+        body: input,
+      }),
+  });
+}
+
+export function useCancelSubscription(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<SubscriptionView>(`/v1/orgs/${orgId}/billing/cancel`, { method: "POST" }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.org(orgId) });
     },
   });
 }

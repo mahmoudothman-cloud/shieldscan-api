@@ -27,6 +27,7 @@ import { relTime } from "@/lib/format";
 import { PlanLimitAlert } from "@/components/PlanLimitAlert";
 import { Alert, Button, Card, Field, Input, Select, Spinner } from "@/components/ui";
 import { planLimitOf } from "@/lib/plan";
+import { BillingCard } from "@/pages/settings/BillingCard";
 import { PlanUsage } from "@/pages/settings/PlanUsage";
 
 const ROLES: Array<{ value: MemberItem["role"]; label: string; blurb: string }> = [
@@ -53,6 +54,9 @@ export default function Settings() {
         </p>
       </header>
       <div className="grid gap-6 lg:grid-cols-2">
+        <div className="lg:col-span-2">
+          <BillingCard orgId={orgId} isAdmin={isAdmin} />
+        </div>
         <div className="lg:col-span-2">
           <PlanUsage orgId={orgId} />
         </div>

@@ -34,7 +34,7 @@ export function PlanUsage({ orgId }: { orgId: string }) {
   const plans = usePlans();
 
   return (
-    <Card title="Plan & usage" id="billing">
+    <Card title="Plan & usage">
       {billing.isPending && <Spinner label="Loading plan" />}
       {billing.isError && <Alert tone="error">Couldn't load the plan summary.</Alert>}
       {billing.data && <Summary data={billing.data} />}
@@ -184,8 +184,7 @@ function Catalog({ plans, current, vat }: { plans: PlanPublic[]; current: string
         </table>
       </div>
       <p className="text-xs text-ink-3">
-        Prices include {vat}% VAT. Online checkout is on its way; to change plan now, contact us and
-        we'll switch it on for you.
+        Prices include {vat}% VAT. Change plan from the Billing card above.
       </p>
     </div>
   );
