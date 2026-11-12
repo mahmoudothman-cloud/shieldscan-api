@@ -24,6 +24,8 @@ const ScanRun = lazy(() => import("@/pages/scans/ScanRun"));
 const VulnerabilitiesList = lazy(() => import("@/pages/vulnerabilities/VulnerabilitiesList"));
 const VulnerabilityDetail = lazy(() => import("@/pages/vulnerabilities/VulnerabilityDetail"));
 const Settings = lazy(() => import("@/pages/settings/Settings"));
+const AdminPlans = lazy(() => import("@/pages/admin/AdminPlans"));
+const AdminOrgs = lazy(() => import("@/pages/admin/AdminOrgs"));
 const ScanReport = lazy(() => import("@/pages/reports/ScanReport"));
 const QuickScanLanding = lazy(() => import("@/pages/public/QuickScanLanding"));
 const QuickScanResult = lazy(() => import("@/pages/public/QuickScanResult"));
@@ -105,6 +107,8 @@ export default function App() {
             <Route path="/vulnerabilities/:vid" element={<VulnerabilityDetail />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/settings/billing" element={<Settings />} />
+            <Route path="/admin/plans" element={<AdminPlans />} />
+            <Route path="/admin/orgs" element={<AdminOrgs />} />
             <Route path="/compliance" element={<Compliance />} />
             <Route path="/tools" element={<ToolHealth />} />
           </Route>

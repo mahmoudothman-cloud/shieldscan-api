@@ -38,7 +38,9 @@ def test_register_request_accepts_valid_input():
 def test_register_request_rejects_short_password():
     with pytest.raises(ValidationError, match="at least"):
         RegisterRequest(
-            email="a@b.c", password="Ab1", full_name="X",
+            email="a@b.c",
+            password="Ab1",
+            full_name="X",
             organization_name="Y",
         )
 
@@ -64,61 +66,77 @@ def test_register_request_rejects_unicode_password_exceeding_72_bytes():
     assert len(emoji_password.encode("utf-8")) > PASSWORD_MAX_BYTES
     with pytest.raises(ValidationError, match="at most"):
         RegisterRequest(
-            email="a@b.c", password=emoji_password,
-            full_name="X", organization_name="Y",
+            email="a@b.c",
+            password=emoji_password,
+            full_name="X",
+            organization_name="Y",
         )
 
 
 def test_register_request_rejects_password_without_letter():
     with pytest.raises(ValidationError, match="letter"):
         RegisterRequest(
-            email="a@b.c", password="12345678",
-            full_name="X", organization_name="Y",
+            email="a@b.c",
+            password="12345678",
+            full_name="X",
+            organization_name="Y",
         )
 
 
 def test_register_request_rejects_password_without_digit():
     with pytest.raises(ValidationError, match="digit"):
         RegisterRequest(
-            email="a@b.c", password="abcdefghXYZ",
-            full_name="X", organization_name="Y",
+            email="a@b.c",
+            password="abcdefghXYZ",
+            full_name="X",
+            organization_name="Y",
         )
 
 
 def test_register_request_rejects_invalid_email():
     with pytest.raises(ValidationError):
         RegisterRequest(
-            email="not-an-email", password="Secure12345",
-            full_name="X", organization_name="Y",
+            email="not-an-email",
+            password="Secure12345",
+            full_name="X",
+            organization_name="Y",
         )
 
 
 def test_register_request_rejects_empty_full_name():
     with pytest.raises(ValidationError):
         RegisterRequest(
-            email="a@b.c", password="Secure12345",
-            full_name="", organization_name="Y",
+            email="a@b.c",
+            password="Secure12345",
+            full_name="",
+            organization_name="Y",
         )
 
 
 def test_register_request_rejects_empty_organization_name():
     with pytest.raises(ValidationError):
         RegisterRequest(
-            email="a@b.c", password="Secure12345",
-            full_name="X", organization_name="",
+            email="a@b.c",
+            password="Secure12345",
+            full_name="X",
+            organization_name="",
         )
 
 
 def test_register_request_rejects_overlong_name_fields():
     with pytest.raises(ValidationError):
         RegisterRequest(
-            email="a@b.c", password="Secure12345",
-            full_name="A" * 256, organization_name="Y",
+            email="a@b.c",
+            password="Secure12345",
+            full_name="A" * 256,
+            organization_name="Y",
         )
     with pytest.raises(ValidationError):
         RegisterRequest(
-            email="a@b.c", password="Secure12345",
-            full_name="X", organization_name="B" * 256,
+            email="a@b.c",
+            password="Secure12345",
+            full_name="X",
+            organization_name="B" * 256,
         )
 
 
@@ -215,7 +233,7 @@ def test_user_response_schema_has_no_password_field_in_openapi():
     (belt-and-suspenders over the value-level check above)."""
     schema = UserResponse.model_json_schema()
     props = set(schema.get("properties", {}).keys())
-    assert props == {"id", "email", "full_name", "email_verified"}, (
+    assert props == {"id", "email", "full_name", "email_verified", "is_platform_admin"}, (
         f"UserResponse must expose exactly these fields, got {props}"
     )
 
@@ -225,8 +243,11 @@ def test_user_response_schema_has_no_password_field_in_openapi():
 
 def test_token_response_has_oauth_fields():
     user = User(
-        id=uuid4(), email="u@t.co", hashed_password="x",
-        full_name="U", email_verified=True,
+        id=uuid4(),
+        email="u@t.co",
+        hashed_password="x",
+        full_name="U",
+        email_verified=True,
     )
     resp = TokenResponse(
         access_token="a.a.a",
@@ -246,12 +267,15 @@ def test_token_response_does_not_leak_password():
     """Double-check the nested UserResponse inside TokenResponse
     doesn't leak credentials when serialized end-to-end."""
     user = User(
-        id=uuid4(), email="u@t.co",
+        id=uuid4(),
+        email="u@t.co",
         hashed_password="must-not-leak-hashed-via-token",
-        full_name="U", email_verified=True,
+        full_name="U",
+        email_verified=True,
     )
     resp = TokenResponse(
-        access_token="a", refresh_token="r",
+        access_token="a",
+        refresh_token="r",
         user=UserResponse.model_validate(user),
     )
     assert "must-not-leak-hashed-via-token" not in resp.model_dump_json()

@@ -57,9 +57,7 @@ def validate_password_shape(v: str) -> str:
     """
     encoded = v.encode("utf-8")
     if len(encoded) < PASSWORD_MIN_BYTES:
-        raise ValueError(
-            f"password must be at least {PASSWORD_MIN_BYTES} bytes"
-        )
+        raise ValueError(f"password must be at least {PASSWORD_MIN_BYTES} bytes")
     if len(encoded) > PASSWORD_MAX_BYTES:
         raise ValueError(
             f"password must be at most {PASSWORD_MAX_BYTES} bytes "
@@ -215,6 +213,14 @@ class UserResponse(BaseModel):
     email: EmailStr
     full_name: str
     email_verified: bool
+    # M12 slice 3. An ORM instance built in memory (tests) has None until
+    # the column default applies at INSERT; the wire value is a plain bool.
+    is_platform_admin: bool = False
+
+    @field_validator("is_platform_admin", mode="before")
+    @classmethod
+    def _none_is_false(cls, v: object) -> object:
+        return False if v is None else v
 
 
 class TokenResponse(BaseModel):

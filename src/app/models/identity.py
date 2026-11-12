@@ -77,6 +77,11 @@ class User(Base, TimestampMixin):
         Boolean, default=False, nullable=False
     )
     github_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    # M12 slice 3: operator of the platform. Never set by API; migration or
+    # psql only. Gates /v1/admin/* (plan catalog, overrides, subscriptions).
+    is_platform_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     memberships = relationship(
         "Membership", back_populates="user", cascade="all, delete-orphan"

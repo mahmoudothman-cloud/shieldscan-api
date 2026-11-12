@@ -7,6 +7,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type {
+  AdminOrgDetail,
+  AdminOrgList,
+  AdminOverride,
+  AdminPlanList,
+  AdminVersionInput,
+  AdminVersionPublished,
   BillingSummaryResponse,
   PlanCatalogResponse,
   OrgResponse,
@@ -500,5 +506,104 @@ export function useBillingSummary(orgId: string) {
   return useQuery({
     queryKey: [...keys.org(orgId), "billing"] as const,
     queryFn: () => api<BillingSummaryResponse>(`/v1/orgs/${orgId}/billing/summary`),
+  });
+}
+
+// ---------------------------------------------------------------- platform admin (M12 slice 3)
+
+export const adminKeys = {
+  plans: ["admin", "plans"] as const,
+  orgs: (q: string) => ["admin", "orgs", q] as const,
+  org: (id: string) => ["admin", "org", id] as const,
+};
+
+export function useAdminPlans() {
+  return useQuery({
+    queryKey: adminKeys.plans,
+    queryFn: () => api<AdminPlanList>("/v1/admin/plans"),
+  });
+}
+
+export function usePublishPlanVersion(code: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: AdminVersionInput) =>
+      api<AdminVersionPublished>(`/v1/admin/plans/${code}/versions`, {
+        method: "POST",
+        body: input,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: adminKeys.plans });
+      void qc.invalidateQueries({ queryKey: ["plans"] });
+    },
+  });
+}
+
+export function usePatchPlan(code: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      is_public?: boolean;
+      archived?: boolean;
+      name?: string;
+      rank?: number;
+    }) => api(`/v1/admin/plans/${code}`, { method: "PATCH", body: input }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: adminKeys.plans });
+      void qc.invalidateQueries({ queryKey: ["plans"] });
+    },
+  });
+}
+
+export function useAdminOrgs(q: string) {
+  return useQuery({
+    queryKey: adminKeys.orgs(q),
+    queryFn: () => api<AdminOrgList>(`/v1/admin/orgs?q=${encodeURIComponent(q)}&limit=50`),
+  });
+}
+
+export function useAdminOrg(id: string | null) {
+  return useQuery({
+    queryKey: adminKeys.org(id ?? ""),
+    queryFn: () => api<AdminOrgDetail>(`/v1/admin/orgs/${id}`),
+    enabled: id !== null,
+  });
+}
+
+export function useSetOverride(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      key: string;
+      value: unknown;
+      reason?: string;
+      expires_at?: string | null;
+    }) =>
+      api<AdminOverride>(`/v1/admin/orgs/${orgId}/overrides/${input.key}`, {
+        method: "PUT",
+        body: { value: input.value, reason: input.reason, expires_at: input.expires_at ?? null },
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.org(orgId) }),
+  });
+}
+
+export function useRemoveOverride(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (key: string) =>
+      api<null>(`/v1/admin/orgs/${orgId}/overrides/${key}`, { method: "DELETE" }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: adminKeys.org(orgId) }),
+  });
+}
+
+export function useAssignSubscription(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { plan_code: string; billing_interval: "month" | "year"; note?: string }) =>
+      api(`/v1/admin/orgs/${orgId}/subscription`, { method: "POST", body: input }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: adminKeys.org(orgId) });
+      void qc.invalidateQueries({ queryKey: ["admin", "orgs"] });
+    },
   });
 }

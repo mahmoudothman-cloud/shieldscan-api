@@ -133,6 +133,11 @@ class PlanVersion(Base, TimestampMixin):
     effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     change_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Who published it (NULL for the seed). The version row IS the audit
+    # trail for catalog edits; audit_logs is tenant-scoped and plans are not.
+    created_by: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     plan: Mapped[Plan] = relationship(back_populates="versions")
 

@@ -24,7 +24,13 @@ export interface OrganizationSummary {
 
 export interface MeResponse {
   kind: "jwt" | "api_key";
-  user: { id: string; email: string; full_name: string; email_verified: boolean } | null;
+  user: {
+    id: string;
+    email: string;
+    full_name: string;
+    email_verified: boolean;
+    is_platform_admin?: boolean;
+  } | null;
   organization: OrganizationSummary;
 }
 
@@ -433,4 +439,102 @@ export interface BillingSummaryResponse {
   features: Record<string, boolean | string[]>;
   usage: Record<string, number>;
   overrides: string[];
+}
+
+// ---------------------------------------------------------------- platform admin (M12 slice 3)
+
+export interface AdminPlanVersion {
+  id: string;
+  plan_id: string;
+  version: number;
+  billing_interval: "month" | "year";
+  price_egp_cents: number;
+  price_usd_cents: number;
+  limits: Record<string, number>;
+  features: Record<string, boolean | string[]>;
+  paymob_plan_id: string | null;
+  paddle_price_id: string | null;
+  effective_from: string;
+  retired_at: string | null;
+  change_note: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface AdminPlan {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  rank: number | null;
+  is_public: boolean;
+  archived_at: string | null;
+  live_versions: AdminPlanVersion[];
+  version_count: number;
+  subscriber_count: number;
+}
+
+export interface AdminPlanList {
+  plans: AdminPlan[];
+  limit_keys: string[];
+  feature_keys: string[];
+}
+
+export interface AdminVersionInput {
+  billing_interval: "month" | "year";
+  price_egp_cents: number;
+  price_usd_cents: number;
+  limits: Record<string, number>;
+  features: Record<string, boolean | string[]>;
+  change_note?: string;
+}
+
+export interface AdminVersionPublished {
+  version: AdminPlanVersion;
+  retired: AdminPlanVersion | null;
+  diff: { field: string; before: unknown; after: unknown }[];
+}
+
+export interface AdminOrgSummary {
+  id: string;
+  name: string;
+  slug: string;
+  created_at: string;
+  members: number;
+  plan_code: string;
+  subscription_status: string;
+  provider: string | null;
+}
+
+export interface AdminOrgList {
+  orgs: AdminOrgSummary[];
+  total: number;
+}
+
+export interface AdminOverride {
+  key: string;
+  value: unknown;
+  reason: string | null;
+  expires_at: string | null;
+  set_by: string | null;
+  updated_at: string;
+}
+
+export interface AdminOrgDetail {
+  org: AdminOrgSummary;
+  subscription: {
+    id: string;
+    plan_version_id: string;
+    status: string;
+    provider: string;
+    current_period_start: string;
+    current_period_end: string | null;
+    note: string | null;
+  } | null;
+  overrides: AdminOverride[];
+  effective_limits: Record<string, number>;
+  effective_features: Record<string, boolean | string[]>;
+  usage: Record<string, number>;
+  period_start: string;
+  period_end: string | null;
 }

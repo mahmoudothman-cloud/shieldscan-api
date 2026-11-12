@@ -550,6 +550,19 @@ async def require_jwt(
     return identity
 
 
+async def require_platform_admin(
+    identity: AuthIdentity = Depends(require_jwt),
+) -> AuthIdentity:
+    """M12 slice 3: the operator of the platform. JWT only (an API key is
+    an org credential, never a platform one), and ``users.is_platform_admin``
+    — set by migration or psql, never by API. 403 otherwise; the body does
+    not say that an admin surface exists."""
+    assert identity.user is not None
+    if not identity.user.is_platform_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+    return identity
+
+
 # ---------------------------------------------------------------- tenant scoping (Task 3.1)
 
 

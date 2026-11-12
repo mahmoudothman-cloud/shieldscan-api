@@ -6,6 +6,7 @@
  */
 
 import { useState } from "react";
+import { Link } from "react-router";
 import type { FormEvent } from "react";
 import { Check, Copy, KeyRound, Trash2 } from "lucide-react";
 import { useAuth, useOrgId } from "@/lib/auth";
@@ -37,6 +38,7 @@ const ROLES: Array<{ value: MemberItem["role"]; label: string; blurb: string }> 
 export default function Settings() {
   const orgId = useOrgId();
   const org = useOrg(orgId);
+  const { me } = useAuth();
   if (org.isPending) return <Spinner label="Loading settings" />;
   if (org.isError) return <Alert tone="error">Couldn't load organization settings.</Alert>;
   const isAdmin = org.data.my_role === "admin";
@@ -54,6 +56,21 @@ export default function Settings() {
         <div className="lg:col-span-2">
           <PlanUsage orgId={orgId} />
         </div>
+        {me?.user?.is_platform_admin && (
+          <Card title="Platform admin" className="lg:col-span-2">
+            <p className="text-sm text-ink-3">
+              Edit the plan catalog, publish new versions, and manage any organization's
+              subscription and overrides.{" "}
+              <Link to="/admin/plans" className="text-brand underline">
+                Plans
+              </Link>{" "}
+              ·{" "}
+              <Link to="/admin/orgs" className="text-brand underline">
+                Organizations
+              </Link>
+            </p>
+          </Card>
+        )}
         <OrgProfile org={org.data} isAdmin={isAdmin} />
         <ApiKeys isAdmin={isAdmin} />
         <div className="lg:col-span-2">
