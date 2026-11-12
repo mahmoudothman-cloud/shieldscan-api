@@ -605,6 +605,7 @@ export interface ScanComparison {
     triaged: number;
     truncated: boolean;
     scope_covered: boolean;
+    scope_known: boolean;
   };
   new: ComparedFinding[];
   regressions: ComparedFinding[];

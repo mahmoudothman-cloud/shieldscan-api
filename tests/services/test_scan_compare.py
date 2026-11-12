@@ -124,7 +124,8 @@ async def test_partition_follows_identity_links(ctx, db_session):
     assert [v.title for v in diff.not_covered] == ["uncovered"]
     assert [v.title for v in diff.new] == ["brand new"]
     assert [v.title for v in diff.regressions] == ["came back"]
-    assert diff.triaged_count == 1 and diff.truncated is False and diff.scope_covered is True
+    assert diff.triaged_count == 1 and diff.truncated is False
+    assert diff.scope_covered is True and diff.scope_known is True
     assert diff.counts() == {
         "new": 1,
         "regressions": 1,

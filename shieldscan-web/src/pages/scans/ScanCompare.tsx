@@ -110,6 +110,11 @@ function Diff({ data }: { data: ScanComparison }) {
           nothing in it was auto-resolved.
         </Alert>
       )}
+      {data.summary.scope_covered && !data.summary.scope_known && (
+        <p className="text-xs text-ink-3">
+          One of these scans predates scope recording, so coverage between them is not known.
+        </p>
+      )}
       <ul className="grid gap-2 sm:grid-cols-5" aria-label="Change summary">
         {BUCKETS.map((b) => {
           const n = data.summary[b.key];

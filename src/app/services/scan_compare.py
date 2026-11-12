@@ -59,6 +59,10 @@ class ScanDiff:
     triaged_count: int = 0
     truncated: bool = False
     scope_covered: bool = True
+    # False when either scan was dispatched before effective configs were
+    # persisted (pre-2026-11-10 rows): scope_covered is then the legacy
+    # "both unknown" answer, not evidence.
+    scope_known: bool = True
 
     def counts(self) -> dict[str, int]:
         return {
@@ -119,7 +123,11 @@ async def compute_diff(
     current_rows = [v for v in rows if v.scan_id == current.id]
     baseline_rows = [v for v in rows if v.scan_id == baseline.id]
 
-    diff = ScanDiff(scope_covered=scope_covers(current.config or {}, baseline.config or {}))
+    b_cfg, c_cfg = baseline.config or {}, current.config or {}
+    diff = ScanDiff(
+        scope_covered=scope_covers(c_cfg, b_cfg),
+        scope_known=bool(b_cfg.get("depth")) and bool(c_cfg.get("depth")),
+    )
 
     # Current side: walk previous_id back to the baseline scan.
     reached_baseline: set[UUID] = set()

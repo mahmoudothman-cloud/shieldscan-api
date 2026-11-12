@@ -61,6 +61,7 @@ class ComparisonSummary(BaseModel):
     # narrower than the baseline's: a large not_covered bucket is then
     # expected, and nothing in it was auto-resolved.
     scope_covered: bool
+    scope_known: bool
 
 
 class ScanComparisonResponse(BaseModel):

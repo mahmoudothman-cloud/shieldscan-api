@@ -485,7 +485,10 @@ async def compare_scans(
         baseline=ComparedScan.model_validate(baseline),
         current=ComparedScan.model_validate(current),
         summary=ComparisonSummary(
-            **diff.counts(), truncated=diff.truncated, scope_covered=diff.scope_covered
+            **diff.counts(),
+            truncated=diff.truncated,
+            scope_covered=diff.scope_covered,
+            scope_known=diff.scope_known,
         ),
         new=_rows(diff.new),
         regressions=_rows(diff.regressions),

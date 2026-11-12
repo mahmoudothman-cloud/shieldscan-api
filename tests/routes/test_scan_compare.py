@@ -250,6 +250,7 @@ async def test_compare_returns_identity_link_diff(cmp_setup, client, db_session)
         "triaged": 0,
         "truncated": False,
         "scope_covered": True,
+        "scope_known": False,
     }
 
 
