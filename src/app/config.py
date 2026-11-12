@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     PUBLIC_SCAN_VISIBLE_FINDINGS: int = 3
     # Base URL of the web app, for links in emails and public responses.
     APP_BASE_URL: str = "https://app.shieldscan.io"
+    # M12 kill switch: False makes every plan cap and feature gate pass
+    # (metering and the billing summary keep working). For incidents —
+    # a bad catalog edit, a Redis outage that mis-resolves limits — and
+    # for the test harness, where most orgs have no subscription row.
+    PLAN_LIMITS_ENFORCED: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

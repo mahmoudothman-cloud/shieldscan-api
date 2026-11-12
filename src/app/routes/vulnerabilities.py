@@ -19,6 +19,7 @@ from __future__ import annotations
 from math import ceil
 from uuid import UUID
 
+import redis.asyncio as redis_asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +42,9 @@ from app.schemas.vulnerabilities import (
     VulnerabilityListItem,
     VulnerabilityPatchRequest,
 )
+from app.redis_client import get_redis
 from app.services.audit import VulnerabilityAction, audit
+from app.services.plan_enforcement import require_feature
 
 router = APIRouter(prefix="/orgs/{org_id}/vulnerabilities", tags=["vulnerabilities"])
 scan_vulns_router = APIRouter(
@@ -244,8 +247,11 @@ async def patch_vulnerability(
     body: VulnerabilityPatchRequest,
     identity: AuthIdentity = Depends(require_org_membership()),
     db: AsyncSession = Depends(get_db),
+    redis: redis_asyncio.Redis = Depends(get_redis),
 ):
     vuln = await _load_vuln(db, org_id, vid)
+    if identity.kind == "api_key":  # M12 slice 2: CLI / MCP writes
+        await require_feature(db, redis, org_id, "cli_write")
 
     if body.status == vuln.status:
         # Q4: same-status PATCH is a 200 no-op — no history row, no audit.

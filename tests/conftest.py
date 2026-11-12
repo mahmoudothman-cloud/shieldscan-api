@@ -101,9 +101,7 @@ def _test_database_url() -> str:
     owner = settings.MIGRATION_DATABASE_URL or settings.DATABASE_URL
     # render_as_string(hide_password=False) — plain str(URL) masks the password
     # as "***", which would produce an unusable URL.
-    resolved = (
-        make_url(owner).set(database=TEST_DB_NAME).render_as_string(hide_password=False)
-    )
+    resolved = make_url(owner).set(database=TEST_DB_NAME).render_as_string(hide_password=False)
     settings.MIGRATION_DATABASE_URL = resolved
     return resolved
 
@@ -203,6 +201,12 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
         plan_rows, version_rows = default_ladder_rows(datetime.now(timezone.utc))
         await conn.execute(Plan.__table__.insert(), plan_rows)
         await conn.execute(PlanVersion.__table__.insert(), version_rows)
+    # Most test orgs have no subscription row and would resolve to Free's
+    # caps (1 project, 1 member, 1 API key...). Enforcement is off for the
+    # harness; tests/routes/test_plan_enforcement.py switches it on.
+    from app.config import settings
+
+    settings.PLAN_LIMITS_ENFORCED = False
 
     # The session is still bound to one connection so a test's GUC survives its
     # commits. Production does NOT pin a connection — TenantSession.after_begin

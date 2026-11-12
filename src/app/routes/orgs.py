@@ -58,6 +58,7 @@ from app.services.audit import OrgAction, audit
 from app.services.auth import hash_password
 from app.services.email import EmailService, get_email_service
 from app.services.email_verification import issue_email_verification_token
+from app.services.plan_enforcement import require_capacity
 from app.services.password_reset import issue_password_reset_token
 
 router = APIRouter(prefix="/orgs/{org_id}", tags=["orgs"])
@@ -365,6 +366,14 @@ async def invite_member(
     SMTP hiccups (the admin can re-invite; the user can use "forgot
     password")."""
     org = await _load_org(db, org_id)
+    # M12 slice 2: users.max counts current memberships (the invitee's
+    # row is created here, so the check is on the count before it).
+    members = (
+        await db.execute(
+            select(func.count(Membership.id)).where(Membership.organization_id == org_id)
+        )
+    ).scalar_one()
+    await require_capacity(db, redis, org_id, "users.max", int(members))
     user = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
     invited_new_user = user is None
 

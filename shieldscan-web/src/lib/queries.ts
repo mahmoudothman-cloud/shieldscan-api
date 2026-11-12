@@ -7,6 +7,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type {
+  BillingSummaryResponse,
+  PlanCatalogResponse,
   OrgResponse,
   OrgSummaryResponse,
   PaginatedProjectsResponse,
@@ -481,5 +483,22 @@ export function useToolHealth(orgId: string) {
     queryKey: [...keys.org(orgId), "tools", "health"] as const,
     queryFn: () => api<ToolHealthResponse>(`/v1/orgs/${orgId}/tools/health`),
     refetchInterval: 30_000,
+  });
+}
+
+// ---------------------------------------------------------------- plans & billing (M12)
+
+export function usePlans() {
+  return useQuery({
+    queryKey: ["plans"] as const,
+    queryFn: () => api<PlanCatalogResponse>("/v1/plans", { anonymous: true }),
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useBillingSummary(orgId: string) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "billing"] as const,
+    queryFn: () => api<BillingSummaryResponse>(`/v1/orgs/${orgId}/billing/summary`),
   });
 }

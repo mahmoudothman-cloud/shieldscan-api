@@ -129,14 +129,16 @@ export function Card({
   action,
   children,
   className,
+  id,
 }: {
   title?: string;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
+  id?: string;
 }) {
   return (
-    <section className={cx("rounded-card border border-line bg-paper", className)}>
+    <section id={id} className={cx("rounded-card border border-line bg-paper", className)}>
       {(title || action) && (
         <header className="flex items-center justify-between border-b border-line-2 px-5 py-3">
           {title && <h2 className="text-sm font-semibold text-ink">{title}</h2>}

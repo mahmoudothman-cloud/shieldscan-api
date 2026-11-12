@@ -15,7 +15,9 @@ import {
   useProjectScans,
   useVerifyDomain,
 } from "@/lib/queries";
+import { PlanLimitAlert } from "@/components/PlanLimitAlert";
 import { ApiError } from "@/lib/api";
+import { planLimitOf } from "@/lib/plan";
 import type { ProjectResponse, ScanCreateInput, VerifyDomainFailure } from "@/lib/types";
 import { duration, relTime, scanTypeLabel } from "@/lib/format";
 import { Alert, Button, Card, Empty, Field, Select, Spinner, StatusBadge } from "@/components/ui";
@@ -239,12 +241,13 @@ function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectRespo
     void navigate(`/scans/${scan.id}`);
   }
 
+  const limit = planLimitOf(create.error);
   const err =
-    create.error instanceof ApiError
+    limit === null && create.error instanceof ApiError
       ? create.error.detail === "domain_not_verified"
         ? "Verify the domain before running this scan type."
         : create.error.status === 429
-          ? "You've reached this plan's scan limit. Try again later."
+          ? "Too many scans started at once. Try again in a minute."
           : String(create.error.detail ?? "Couldn't start the scan.")
       : null;
 
@@ -268,6 +271,7 @@ function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectRespo
         </Field>
         <p className="text-sm text-ink-3">{chosen.blurb}</p>
         {blocked && <Alert tone="info">{blocked}</Alert>}
+        {limit && <PlanLimitAlert limit={limit} />}
         {err && <Alert tone="error">{err}</Alert>}
         <Button onClick={() => void run()} disabled={blocked !== null} loading={create.isPending}>
           Start {scanTypeLabel(type).toLowerCase()} scan

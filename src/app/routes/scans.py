@@ -90,7 +90,12 @@ from app.schemas.scan_compare import (
 )
 from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
-from app.services.plans import get_effective_limits, record_scan_usage
+from app.services.plan_enforcement import (
+    clamp_subdomain_limit,
+    require_feature,
+    require_scan_capacity,
+)
+from app.services.plans import record_scan_usage
 from app.services.scan_compare import compute_diff
 from app.services.scan_queue import (
     ProgressSubscriber,
@@ -247,6 +252,13 @@ async def create_scan(
             # cross-tenant project lookups.
             raise _NOT_FOUND
 
+    # Step 5b (M12 slice 2): plan checks. API-key callers (CLI, Action,
+    # MCP) need cli_write; the scan type's period meter must have room;
+    # recon never expands past the plan's subdomain cap.
+    if identity.kind == "api_key":
+        await require_feature(db, redis, org_id, "cli_write")
+    eff = await require_scan_capacity(db, redis, org_id, body.scan_type)
+
     # Step 6: build + flush Scan row (no commit — orchestrator owns).
     scan = Scan(
         organization_id=org_id,
@@ -256,16 +268,14 @@ async def create_scan(
         priority=body.priority.value,
         config=body.config,
         recon_enabled=body.recon_enabled,
-        subdomain_limit=body.subdomain_limit,
+        subdomain_limit=clamp_subdomain_limit(eff, body.subdomain_limit),
         mobile_upload_id=body.mobile_upload_id,
     )
     db.add(scan)
     await db.flush()
 
     # Step 6b: meter the scan against the org's period (M12 slice 1).
-    # Same transaction as the Scan row: a dispatch failure rolls both
-    # back. Enforcement of the cap lands in slice 2.
-    eff = await get_effective_limits(db, redis, org_id)
+    # Same transaction as the Scan row: a dispatch failure rolls both back.
     await record_scan_usage(db, eff, org_id, scan.scan_type)
 
     # Step 7: eager-attach project in-memory so orchestrator's

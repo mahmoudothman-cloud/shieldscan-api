@@ -500,3 +500,16 @@ async def test_budget_fallback_is_also_flagged(db_session, monkeypatch):
 
     await generate_fix(db=db_session, vulnerability=vuln, raw_finding=None, scan=scan)
     assert vuln.ai_fix_is_fallback is True
+
+
+async def test_generate_fixes_plan_without_ai_fix_uses_plan_fallback(db_session, monkeypatch):
+    """M12 slice 2: a plan without ``ai_fix`` gets the pattern fallback for
+    every vulnerability, spends nothing, and is NOT marked degraded."""
+    org, project, scan = await seed_org_project_scan(db_session)
+    client = install_anthropic(monkeypatch, [make_anthropic_response(_FIX_TEXT)])
+    vuln = await add_vulnerability(db_session, scan, org, project, severity_score=9.0)
+    await _generate_fixes(db=db_session, scan_id=scan.id, ai_fix=False)
+    assert vuln.ai_fix_is_fallback is True
+    assert "not included in your plan" in (vuln.ai_fix_text or "")
+    assert scan.ai_pipeline_degraded is False
+    assert client.messages.calls == []

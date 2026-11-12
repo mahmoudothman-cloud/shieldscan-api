@@ -5,7 +5,9 @@ import type { FormEvent } from "react";
 import { Link, useNavigate } from "react-router";
 import { useOrgId } from "@/lib/auth";
 import { useCreateProject } from "@/lib/queries";
+import { PlanLimitAlert } from "@/components/PlanLimitAlert";
 import { ApiError } from "@/lib/api";
+import { planLimitOf } from "@/lib/plan";
 import { Alert, Button, Card, Field, Input } from "@/components/ui";
 
 export default function NewProject() {
@@ -30,8 +32,9 @@ export default function NewProject() {
     void navigate(`/projects/${project.id}#verify`);
   }
 
+  const limit = planLimitOf(create.error);
   const errorText =
-    create.error instanceof ApiError
+    limit === null && create.error instanceof ApiError
       ? create.error.status === 422
         ? "That target URL doesn't look right. Use the site's public https:// address."
         : String(create.error.detail ?? "Couldn't create the project.")
@@ -51,6 +54,7 @@ export default function NewProject() {
       </header>
       <Card>
         <form onSubmit={onSubmit} className="flex flex-col gap-4" noValidate>
+          {limit && <PlanLimitAlert limit={limit} />}
           {errorText && <Alert tone="error">{errorText}</Alert>}
           <Field
             label="Target URL"

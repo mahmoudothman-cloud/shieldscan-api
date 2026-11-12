@@ -104,6 +104,7 @@ export default function App() {
             <Route path="/vulnerabilities" element={<VulnerabilitiesList />} />
             <Route path="/vulnerabilities/:vid" element={<VulnerabilityDetail />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/settings/billing" element={<Settings />} />
             <Route path="/compliance" element={<Compliance />} />
             <Route path="/tools" element={<ToolHealth />} />
           </Route>

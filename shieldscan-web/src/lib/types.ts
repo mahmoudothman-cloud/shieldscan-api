@@ -396,3 +396,41 @@ export interface ToolHealthResponse {
   tools: Array<{ engine: string; available: boolean; live_worker_count: number }>;
   checked_at: string;
 }
+
+// ---------------------------------------------------------------- plans & billing (M12)
+
+export interface PlanPrice {
+  version_id: string;
+  billing_interval: "month" | "year";
+  price_egp_cents: number;
+  price_usd_cents: number;
+  limits: Record<string, number>;
+  features: Record<string, boolean | string[]>;
+}
+
+export interface PlanPublic {
+  code: string;
+  name: string;
+  description: string | null;
+  rank: number | null;
+  prices: PlanPrice[];
+}
+
+export interface PlanCatalogResponse {
+  plans: PlanPublic[];
+  vat_included: boolean;
+  vat_rate_percent: number;
+}
+
+export interface BillingSummaryResponse {
+  plan_code: string;
+  plan_name: string;
+  billing_interval: "month" | "year";
+  subscription_status: string;
+  period_start: string;
+  period_end: string | null;
+  limits: Record<string, number>;
+  features: Record<string, boolean | string[]>;
+  usage: Record<string, number>;
+  overrides: string[];
+}

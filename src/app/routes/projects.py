@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from math import ceil
 from uuid import UUID, uuid4
 
+import redis.asyncio as redis_asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +78,7 @@ from app.services.domain_verify import (
     verify_meta_tag,
 )
 from app.services.projects import extract_root_domain
+from app.services.plan_enforcement import require_capacity
 from app.services.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -138,11 +140,22 @@ async def create_project(
     request: Request,
     identity: AuthIdentity = Depends(require_org_membership()),
     db: AsyncSession = Depends(get_db),
+    redis: redis_asyncio.Redis = Depends(get_redis),
 ):
     try:
         root_domain = extract_root_domain(body.target_url)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+    # M12 slice 2: projects.max counts live (non-archived) projects.
+    live = (
+        await db.execute(
+            select(func.count(Project.id)).where(
+                Project.organization_id == org_id, Project.archived_at.is_(None)
+            )
+        )
+    ).scalar_one()
+    await require_capacity(db, redis, org_id, "projects.max", int(live))
 
     project = Project(
         organization_id=org_id,

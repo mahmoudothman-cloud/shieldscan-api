@@ -26,8 +26,9 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
+import redis.asyncio as redis_asyncio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import (
@@ -47,6 +48,8 @@ from app.schemas.api_keys import (
 )
 from app.services.api_keys import generate_api_key
 from app.services.audit import AuthAction, audit
+from app.redis_client import get_redis
+from app.services.plan_enforcement import require_capacity
 from app.services.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -95,6 +98,7 @@ async def create_api_key(
     identity: AuthIdentity = Depends(require_jwt),
     db: AsyncSession = Depends(get_db),
     limiter: RateLimiter = Depends(get_rate_limiter),
+    redis: redis_asyncio.Redis = Depends(get_redis),
 ):
     await _require_admin(db, identity)
 
@@ -105,6 +109,17 @@ async def create_api_key(
         limiter,
         [("api_key_create", str(identity.organization_id), 10, 3600)],
     )
+
+    # M12 slice 2: api_keys.max counts active (non-revoked) keys.
+    active = (
+        await db.execute(
+            select(func.count(APIKey.id)).where(
+                APIKey.organization_id == identity.organization_id,
+                APIKey.revoked_at.is_(None),
+            )
+        )
+    ).scalar_one()
+    await require_capacity(db, redis, identity.organization_id, "api_keys.max", int(active))
 
     plaintext, key_hash, key_prefix = generate_api_key(env="live")
     assert identity.user is not None

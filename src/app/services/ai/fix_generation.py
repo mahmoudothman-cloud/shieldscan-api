@@ -177,14 +177,22 @@ def _format_evidence(vuln: Vulnerability, raw_finding: RawFinding | None) -> str
     )
 
 
-def _fallback_fix_template(vuln: Vulnerability) -> str:
-    """Q4 deterministic fallback used when Claude is unavailable or over budget.
+def _fallback_fix_template(vuln: Vulnerability, *, reason: str = "unavailable") -> str:
+    """Q4 deterministic fallback used when Claude is unavailable or over budget,
+    and (M12) the whole of what a plan without ``ai_fix`` gets.
 
-    The caller sets ``Scan.ai_pipeline_degraded`` when it uses this path (Q8 B.b).
+    The caller sets ``Scan.ai_pipeline_degraded`` when it uses this path for
+    a degradation (Q8 B.b); the plan path leaves that flag alone.
     """
+    lead = (
+        "AI-generated remediation is not included in your plan; upgrade to get a "
+        "fix written for this exact finding. "
+        if reason == "plan"
+        else "AI-generated remediation is temporarily unavailable for this finding. "
+    )
     return (
         "## Explanation\n"
-        "AI-generated remediation is temporarily unavailable for this finding. "
+        f"{lead}"
         f"This is a {vuln.severity.value} severity {vuln.engine_category.value} "
         f"issue (CWE: {vuln.cwe_id or 'N/A'}).\n\n"
         "## Fix Code\n"
@@ -197,14 +205,14 @@ def _fallback_fix_template(vuln: Vulnerability) -> str:
     )
 
 
-def _use_fallback(vuln: Vulnerability) -> str:
+def _use_fallback(vuln: Vulnerability, *, reason: str = "unavailable") -> str:
     """Assign the fallback template AND mark the vulnerability as fallen back.
 
     One helper so the two can never drift: a fix_text without the flag is
     exactly the state that forced audits to match on
     ``ai_fix_text LIKE '%temporarily unavailable%'``.
     """
-    fix_text = _fallback_fix_template(vuln)
+    fix_text = _fallback_fix_template(vuln, reason=reason)
     vuln.ai_fix_text = fix_text
     vuln.ai_fix_is_fallback = True
     return fix_text
@@ -390,7 +398,7 @@ async def generate_fix(
     return fix_text
 
 
-async def _generate_fixes(*, db: AsyncSession, scan_id: UUID) -> None:
+async def _generate_fixes(*, db: AsyncSession, scan_id: UUID, ai_fix: bool = True) -> None:
     """Scan-level fix-generation orchestrator (Q6 + Q7 + Q8 B.b; Path A).
 
     Loads the scan's Vulnerabilities, skips those already fixed (Q7 A idempotency),
@@ -477,6 +485,12 @@ async def _generate_fixes(*, db: AsyncSession, scan_id: UUID) -> None:
             if vuln.raw_finding_ids
             else None
         )
+        if not ai_fix:
+            # M12 slice 2: the plan has no AI fix generation (Free). The
+            # pattern fallback is the product here, not a degradation, so
+            # ai_pipeline_degraded is left alone and nothing is spent.
+            _use_fallback(vuln, reason="plan")
+            continue
         degraded_pre = scan.ai_pipeline_degraded
         await generate_fix(
             db=db, vulnerability=vuln, raw_finding=rep, scan=scan

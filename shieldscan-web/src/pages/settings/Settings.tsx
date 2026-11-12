@@ -23,7 +23,10 @@ import {
 import { ApiError } from "@/lib/api";
 import type { MemberItem, OrgResponse } from "@/lib/types";
 import { relTime } from "@/lib/format";
+import { PlanLimitAlert } from "@/components/PlanLimitAlert";
 import { Alert, Button, Card, Field, Input, Select, Spinner } from "@/components/ui";
+import { planLimitOf } from "@/lib/plan";
+import { PlanUsage } from "@/pages/settings/PlanUsage";
 
 const ROLES: Array<{ value: MemberItem["role"]; label: string; blurb: string }> = [
   { value: "admin", label: "Admin", blurb: "Everything, including members, API keys and billing." },
@@ -48,6 +51,9 @@ export default function Settings() {
         </p>
       </header>
       <div className="grid gap-6 lg:grid-cols-2">
+        <div className="lg:col-span-2">
+          <PlanUsage orgId={orgId} />
+        </div>
         <OrgProfile org={org.data} isAdmin={isAdmin} />
         <ApiKeys isAdmin={isAdmin} />
         <div className="lg:col-span-2">
@@ -205,8 +211,9 @@ function Members({ orgId, isAdmin }: { orgId: string; isAdmin: boolean }) {
     setEmail("");
   }
 
+  const inviteLimit = planLimitOf(invite.error);
   const inviteError =
-    invite.error instanceof ApiError
+    inviteLimit === null && invite.error instanceof ApiError
       ? invite.error.detail === "already_member"
         ? "That person is already a member."
         : invite.error.status === 403
@@ -270,6 +277,7 @@ function Members({ orgId, isAdmin }: { orgId: string; isAdmin: boolean }) {
             </p>
           </form>
         )}
+        {inviteLimit && <PlanLimitAlert limit={inviteLimit} />}
         {inviteError && <Alert tone="error">{inviteError}</Alert>}
         {lastInvite && !invite.isError && <Alert tone="success">{lastInvite}</Alert>}
         {(roleError || removeError) && <Alert tone="error">{roleError ?? removeError}</Alert>}
@@ -380,6 +388,7 @@ function Members({ orgId, isAdmin }: { orgId: string; isAdmin: boolean }) {
 function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
   const list = useApiKeys();
   const create = useCreateApiKey();
+  const keyLimit = planLimitOf(create.error);
   const revoke = useRevokeApiKey();
   const [name, setName] = useState("");
   const [copied, setCopied] = useState(false);
@@ -419,7 +428,8 @@ function ApiKeys({ isAdmin }: { isAdmin: boolean }) {
             </Button>
           </form>
         )}
-        {create.isError && <Alert tone="error">Couldn't create the key.</Alert>}
+        {keyLimit && <PlanLimitAlert limit={keyLimit} />}
+        {create.isError && !keyLimit && <Alert tone="error">Couldn't create the key.</Alert>}
         {fresh && (
           <div className="rounded-control border border-brand/40 bg-brand-wash p-3 text-sm">
             <p className="font-medium text-ink">Copy this key now — it is shown once.</p>

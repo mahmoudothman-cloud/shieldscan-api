@@ -44,6 +44,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.raw_findings import RawFinding
 from app.models.scans import Scan
 from app.models.vulnerabilities import Vulnerability
+from app.services.plan_enforcement import feature_on
+from app.services.plans import resolve_limits
 from app.services.vulnerability_identity import reconcile_scan_history
 from app.services.ai.clients import get_openai_client, get_qdrant_client
 from app.services.ai.correlation import (
@@ -540,9 +542,16 @@ async def run(*, db: AsyncSession, scan_id: UUID) -> None:
     await _dedup_and_promote(
         db=db, scan=scan, raw_findings=raw_findings, embeddings=embeddings
     )
+    # M12 slice 2: plan features decide which AI stages run. Resolved once
+    # per scan, uncached (the worker has no request-scoped Redis handle and
+    # one query per scan is nothing next to the pipeline itself).
+    eff = await resolve_limits(db, scan.organization_id)
     # M9.B (ADR-031 Q13): correlate cross-engine Vulnerabilities, then score.
     # Sequential composition; both operate on the Vulnerabilities promoted above.
-    await _correlate_vulnerabilities(db=db, scan_id=scan_id)
+    if feature_on(eff, "cross_layer"):
+        await _correlate_vulnerabilities(db=db, scan_id=scan_id)
+    else:
+        logger.info("ai-pipeline: scan %s plan %s has no cross_layer; skipping correlation", scan_id, eff.plan_code)
     await _score_vulnerabilities(db=db, scan_id=scan_id)
     # M11: link to the project's history — carry triage status forward,
     # supersede older copies, flag regressions, auto-resolve what this scan
@@ -551,7 +560,7 @@ async def run(*, db: AsyncSession, scan_id: UUID) -> None:
     # M9.C (ADR-032 Q13): generate per-vuln AI fixes (Path A), then the scan
     # executive summary. Sequential; both read the scored Vulnerabilities above and
     # write ai_fix_text / executive_summary within this same transaction.
-    await _generate_fixes(db=db, scan_id=scan_id)
+    await _generate_fixes(db=db, scan_id=scan_id, ai_fix=feature_on(eff, "ai_fix"))
     await _generate_executive_summary(db=db, scan_id=scan_id)
     # Q7 B.a: final flush of the raw_finding link UPDATEs. Vulnerability INSERTs
     # are flushed eagerly per-create (FK ordering; D-deviation #1) but all within
