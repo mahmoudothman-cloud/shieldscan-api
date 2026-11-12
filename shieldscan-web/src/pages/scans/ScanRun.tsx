@@ -14,6 +14,7 @@ import type { ProgressEvent, ScanJobDetail, Severity } from "@/lib/types";
 import { duration, relTime, scanTypeLabel } from "@/lib/format";
 import { cx } from "@/lib/cx";
 import { Alert, Button, Card, SeverityBadge, Spinner, StatusBadge } from "@/components/ui";
+import { ScanCompare } from "@/pages/scans/ScanCompare";
 
 const SEVS: Severity[] = ["critical", "high", "medium", "low", "info"];
 
@@ -117,6 +118,7 @@ export default function ScanRun() {
               ))}
             </ul>
           </Card>
+          <ScanCompare scan={s} />
           {s.vulnerability_count > 0 && (
             <Card title="Findings by severity">
               <div className="flex flex-wrap gap-4">

@@ -1,19 +1,14 @@
-"""Service-level tests for ``app.services.scan_compare.compute_diff`` (Task 4.6).
+"""Service-level tests for ``app.services.scan_compare.compute_diff`` —
+identity-link version (2026-11-13).
 
-Four tests pinning the diff algorithm:
-
-  1. identical scans → all persisting, none new/resolved
-  2. mixed (some new, some resolved, some persisting) → correct buckets
-  3. empty baseline (first scan ever) → all current findings new
-  4. truncation: cap respected per category, truncated=True flag set
-
-Note: M9 AI pipeline normally populates the vulnerabilities table.
-4.6 only READS — these tests seed Vulnerability rows directly to
-exercise the diff logic deterministically.
+Rows are seeded directly with the links the identity pass writes
+(``previous_id`` / ``superseded_by_id`` / ``regression``), so the
+partition logic is exercised deterministically without the pipeline.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -23,38 +18,57 @@ from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.projects import Project
 from app.models.raw_findings import EngineCategory, Severity
 from app.models.scans import Scan, ScanStatus, ScanType
-from app.models.vulnerabilities import Vulnerability
+from app.models.vulnerabilities import Vulnerability, VulnerabilityStatus
 from app.services.auth import hash_password
-from app.services.scan_compare import compute_diff
+from app.services.scan_compare import compute_diff, default_baseline
 from tests.conftest import use_org
 
 
-# ---------------------------------------------------------------- helpers
-
-
-def _vuln(*, scan_id, project_id, org_id, fingerprint, title="x", severity=Severity.MEDIUM):
-    """Build a Vulnerability ORM row with required fields populated."""
+def _vuln(*, scan, title="x", severity=Severity.MEDIUM, status=VulnerabilityStatus.OPEN, **kw):
     return Vulnerability(
-        scan_id=scan_id,
-        project_id=project_id,
-        organization_id=org_id,
+        scan_id=scan.id,
+        project_id=scan.project_id,
+        organization_id=scan.organization_id,
         title=title,
         severity=severity,
+        status=status,
         finding_type="xss",
         engine_category=EngineCategory.DAST,
-        fingerprint=fingerprint,
+        fingerprint=uuid4().hex,
+        **kw,
     )
 
 
+async def _scan(
+    db_session,
+    org,
+    project,
+    *,
+    when: datetime,
+    scan_type=ScanType.QUICK,
+    config=None,
+    status=ScanStatus.COMPLETED,
+):
+    s = Scan(
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=scan_type,
+        status=status,
+        priority="normal",
+        config=config if config is not None else {"depth": "deep", "template_categories": []},
+        created_at=when,
+    )
+    db_session.add(s)
+    await db_session.flush()
+    return s
+
+
 @pytest_asyncio.fixture
-async def two_scans(db_session):
-    """Single org + project + two completed scans. Returns dict
-    with both scan_ids (caller seeds vulnerabilities)."""
+async def ctx(db_session):
     org = Organization(name="Cmp Org", slug=f"cmp-{uuid4().hex[:8]}")
     db_session.add(org)
     await db_session.flush()
     await use_org(db_session, org.id)
-
     user = User(
         email=f"cm-{uuid4().hex[:6]}@t.co",
         hashed_password=hash_password("CmPass-1"),
@@ -63,10 +77,7 @@ async def two_scans(db_session):
     )
     db_session.add(user)
     await db_session.flush()
-    db_session.add(
-        Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN)
-    )
-
+    db_session.add(Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN))
     project = Project(
         organization_id=org.id,
         name="CmpApp",
@@ -76,149 +87,107 @@ async def two_scans(db_session):
     )
     db_session.add(project)
     await db_session.flush()
-
-    baseline = Scan(
-        organization_id=org.id,
-        project_id=project.id,
-        scan_type=ScanType.QUICK,
-        status=ScanStatus.COMPLETED,
-        priority="normal",
-        config={},
-    )
-    current = Scan(
-        organization_id=org.id,
-        project_id=project.id,
-        scan_type=ScanType.QUICK,
-        status=ScanStatus.COMPLETED,
-        priority="normal",
-        config={},
-    )
-    db_session.add_all([baseline, current])
+    t0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    baseline = await _scan(db_session, org, project, when=t0)
+    current = await _scan(db_session, org, project, when=t0 + timedelta(days=2))
     await db_session.commit()
-    await db_session.refresh(baseline)
-    await db_session.refresh(current)
+    return {"org": org, "project": project, "baseline": baseline, "current": current, "t0": t0}
 
-    return {
-        "org": org,
-        "project": project,
-        "user": user,
-        "baseline": baseline,
-        "current": current,
+
+@pytest.mark.asyncio
+async def test_partition_follows_identity_links(ctx, db_session):
+    b, c = ctx["baseline"], ctx["current"]
+    # persisting: b1 -> c1
+    b1 = _vuln(scan=b, title="persist")
+    db_session.add(b1)
+    await db_session.flush()
+    c1 = _vuln(scan=c, title="persist", previous_id=b1.id)
+    db_session.add(c1)
+    await db_session.flush()
+    b1.superseded_by_id = c1.id
+    # fixed: b2 auto-resolved by c
+    b2 = _vuln(scan=b, title="fixed", status=VulnerabilityStatus.RESOLVED)
+    # not covered: b3 still open, nothing in c
+    b3 = _vuln(scan=b, title="uncovered")
+    # triaged: b4 false positive, hidden
+    b4 = _vuln(scan=b, title="fp", status=VulnerabilityStatus.FALSE_POSITIVE)
+    # new: c2 no link; regression: c3 flagged
+    c2 = _vuln(scan=c, title="brand new")
+    c3 = _vuln(scan=c, title="came back", regression=True)
+    db_session.add_all([b2, b3, b4, c2, c3])
+    await db_session.commit()
+
+    diff = await compute_diff(db_session, b, c)
+    assert [v.title for v in diff.persisting] == ["persist"]
+    assert diff.persisting[0].scan_id == c.id  # current's row is shown
+    assert [v.title for v in diff.fixed] == ["fixed"]
+    assert [v.title for v in diff.not_covered] == ["uncovered"]
+    assert [v.title for v in diff.new] == ["brand new"]
+    assert [v.title for v in diff.regressions] == ["came back"]
+    assert diff.triaged_count == 1 and diff.truncated is False and diff.scope_covered is True
+    assert diff.counts() == {
+        "new": 1,
+        "regressions": 1,
+        "persisting": 1,
+        "fixed": 1,
+        "not_covered": 1,
+        "triaged": 1,
     }
 
 
-# ============================================================ 1. identical
+@pytest.mark.asyncio
+async def test_chain_through_intermediate_scan_and_scope_flag(ctx, db_session):
+    org, project, b, c, t0 = ctx["org"], ctx["project"], ctx["baseline"], ctx["current"], ctx["t0"]
+    mid = await _scan(db_session, org, project, when=t0 + timedelta(days=1))
+    b1 = _vuln(scan=b, title="via mid")
+    db_session.add(b1)
+    await db_session.flush()
+    m1 = _vuln(scan=mid, title="via mid", previous_id=b1.id)
+    db_session.add(m1)
+    await db_session.flush()
+    b1.superseded_by_id = m1.id
+    c1 = _vuln(scan=c, title="via mid", previous_id=m1.id)
+    db_session.add(c1)
+    await db_session.flush()
+    m1.superseded_by_id = c1.id
+    # A baseline row resolved in the middle scan and absent from c → fixed.
+    b2 = _vuln(scan=b, title="fixed in mid")
+    db_session.add(b2)
+    await db_session.flush()
+    m2 = _vuln(
+        scan=mid, title="fixed in mid", previous_id=b2.id, status=VulnerabilityStatus.RESOLVED
+    )
+    db_session.add(m2)
+    await db_session.flush()
+    b2.superseded_by_id = m2.id
+    # Current is a narrower (quick-tag) scan than the baseline.
+    c.config = {"depth": "deep", "template_categories": ["misconfig"]}
+    await db_session.commit()
+
+    diff = await compute_diff(db_session, b, c)
+    assert [v.title for v in diff.persisting] == ["via mid"] and diff.persisting[0].id == c1.id
+    assert [v.title for v in diff.fixed] == ["fixed in mid"]
+    assert diff.scope_covered is False
 
 
 @pytest.mark.asyncio
-async def test_compute_diff_identical_scans_all_persisting(two_scans, db_session):
-    s = two_scans
-    fps = ["fp_" + ("a" * 60), "fp_" + ("b" * 60), "fp_" + ("c" * 60)]
-    for fp in fps:
-        db_session.add(_vuln(
-            scan_id=s["baseline"].id,
-            project_id=s["project"].id,
-            org_id=s["org"].id,
-            fingerprint=fp,
-        ))
-        db_session.add(_vuln(
-            scan_id=s["current"].id,
-            project_id=s["project"].id,
-            org_id=s["org"].id,
-            fingerprint=fp,
-        ))
-    await db_session.commit()
-
-    new, resolved, persisting, truncated = await compute_diff(
-        db_session, s["baseline"].id, s["current"].id
+async def test_default_baseline_is_previous_finished_same_type(ctx, db_session):
+    org, project, b, c, t0 = ctx["org"], ctx["project"], ctx["baseline"], ctx["current"], ctx["t0"]
+    assert (await default_baseline(db_session, c)).id == b.id
+    # A newer failed scan and a different type are skipped.
+    await _scan(db_session, org, project, when=t0 + timedelta(days=1), status=ScanStatus.FAILED)
+    await _scan(
+        db_session, org, project, when=t0 + timedelta(days=1, hours=1), scan_type=ScanType.FULL_WEB
     )
-    assert new == []
-    assert resolved == []
-    assert {v.fingerprint for v in persisting} == set(fps)
-    assert truncated is False
-
-
-# ============================================================ 2. mixed
+    await db_session.commit()
+    assert (await default_baseline(db_session, c)).id == b.id
+    assert await default_baseline(db_session, b) is None
 
 
 @pytest.mark.asyncio
-async def test_compute_diff_categorizes_correctly(two_scans, db_session):
-    s = two_scans
-    persisting_fp = "fp_persisting" + "0" * 49  # 64 chars
-    resolved_fp = "fp_resolved" + "0" * 51
-    new_fp = "fp_new" + "0" * 56
-
-    # baseline: persisting + resolved
-    db_session.add(_vuln(
-        scan_id=s["baseline"].id, project_id=s["project"].id,
-        org_id=s["org"].id, fingerprint=persisting_fp,
-    ))
-    db_session.add(_vuln(
-        scan_id=s["baseline"].id, project_id=s["project"].id,
-        org_id=s["org"].id, fingerprint=resolved_fp,
-    ))
-    # current: persisting + new
-    db_session.add(_vuln(
-        scan_id=s["current"].id, project_id=s["project"].id,
-        org_id=s["org"].id, fingerprint=persisting_fp,
-    ))
-    db_session.add(_vuln(
-        scan_id=s["current"].id, project_id=s["project"].id,
-        org_id=s["org"].id, fingerprint=new_fp,
-    ))
+async def test_truncation_cap(ctx, db_session):
+    c = ctx["current"]
+    db_session.add_all([_vuln(scan=c, title=f"n{i}") for i in range(5)])
     await db_session.commit()
-
-    new, resolved, persisting, truncated = await compute_diff(
-        db_session, s["baseline"].id, s["current"].id
-    )
-    assert {v.fingerprint for v in new} == {new_fp}
-    assert {v.fingerprint for v in resolved} == {resolved_fp}
-    assert {v.fingerprint for v in persisting} == {persisting_fp}
-    # Persisting returns the CURRENT scan's row (latest observation).
-    assert persisting[0].scan_id == s["current"].id
-    assert truncated is False
-
-
-# ============================================================ 3. empty baseline
-
-
-@pytest.mark.asyncio
-async def test_compute_diff_empty_baseline_all_new(two_scans, db_session):
-    s = two_scans
-    fps = ["fp_" + str(i).zfill(61) for i in range(3)]
-    for fp in fps:
-        db_session.add(_vuln(
-            scan_id=s["current"].id, project_id=s["project"].id,
-            org_id=s["org"].id, fingerprint=fp,
-        ))
-    await db_session.commit()
-
-    new, resolved, persisting, truncated = await compute_diff(
-        db_session, s["baseline"].id, s["current"].id
-    )
-    assert {v.fingerprint for v in new} == set(fps)
-    assert resolved == []
-    assert persisting == []
-    assert truncated is False
-
-
-# ============================================================ 4. truncation
-
-
-@pytest.mark.asyncio
-async def test_compute_diff_truncates_at_cap(two_scans, db_session):
-    s = two_scans
-    # Seed 5 net-new findings; cap at 2 → truncated=True, exactly 2 returned.
-    fps = ["fp_" + str(i).zfill(61) for i in range(5)]
-    for fp in fps:
-        db_session.add(_vuln(
-            scan_id=s["current"].id, project_id=s["project"].id,
-            org_id=s["org"].id, fingerprint=fp,
-        ))
-    await db_session.commit()
-
-    new, resolved, persisting, truncated = await compute_diff(
-        db_session, s["baseline"].id, s["current"].id, cap_per_category=2
-    )
-    assert len(new) == 2
-    assert truncated is True
+    diff = await compute_diff(db_session, ctx["baseline"], c, cap_per_category=3)
+    assert diff.truncated is True and len(diff.new) == 3

@@ -7,6 +7,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type {
+  ScanComparison,
   SubscriptionView,
   AdminOrgDetail,
   AdminOrgList,
@@ -635,5 +636,25 @@ export function useCancelSubscription(orgId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.org(orgId) });
     },
+  });
+}
+
+// ---------------------------------------------------------------- scan comparison
+
+export function useScanComparison(
+  orgId: string,
+  scanId: string,
+  baselineId: string | null,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [...keys.org(orgId), "scan", scanId, "compare", baselineId ?? "auto"] as const,
+    queryFn: () =>
+      api<ScanComparison>(`/v1/orgs/${orgId}/scans/compare`, {
+        method: "POST",
+        body: { current_scan_id: scanId, ...(baselineId ? { baseline_scan_id: baselineId } : {}) },
+      }),
+    enabled,
+    retry: false,
   });
 }

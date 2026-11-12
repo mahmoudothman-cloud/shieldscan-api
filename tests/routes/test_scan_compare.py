@@ -22,6 +22,7 @@ Nine tests pinning the route contract:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -33,7 +34,7 @@ from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.projects import Project
 from app.models.raw_findings import EngineCategory, Severity
 from app.models.scans import Scan, ScanStatus, ScanType
-from app.models.vulnerabilities import Vulnerability
+from app.models.vulnerabilities import Vulnerability, VulnerabilityStatus
 from app.services.auth import create_access_token, hash_password
 from tests.conftest import use_org
 
@@ -75,9 +76,7 @@ async def cmp_setup(client, db_session):
     )
     db_session.add(user)
     await db_session.flush()
-    db_session.add(
-        Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN)
-    )
+    db_session.add(Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN))
 
     project = Project(
         organization_id=org.id,
@@ -89,15 +88,24 @@ async def cmp_setup(client, db_session):
     db_session.add(project)
     await db_session.flush()
 
+    t0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
     baseline = Scan(
-        organization_id=org.id, project_id=project.id,
-        scan_type=ScanType.QUICK, status=ScanStatus.COMPLETED,
-        priority="normal", config={},
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=ScanType.QUICK,
+        status=ScanStatus.COMPLETED,
+        priority="normal",
+        config={},
+        created_at=t0,
     )
     current = Scan(
-        organization_id=org.id, project_id=project.id,
-        scan_type=ScanType.QUICK, status=ScanStatus.COMPLETED,
-        priority="normal", config={},
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=ScanType.QUICK,
+        status=ScanStatus.COMPLETED,
+        priority="normal",
+        config={},
+        created_at=t0 + timedelta(days=1),
     )
     db_session.add_all([baseline, current])
     await db_session.commit()
@@ -129,20 +137,23 @@ async def other_org_scan(db_session):
     )
     db_session.add(user)
     await db_session.flush()
-    db_session.add(
-        Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN)
-    )
+    db_session.add(Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN))
     project = Project(
-        organization_id=org.id, name="OcApp",
-        target_url="https://oc.example.com", root_domain="example.com",
+        organization_id=org.id,
+        name="OcApp",
+        target_url="https://oc.example.com",
+        root_domain="example.com",
         domain_verified=True,
     )
     db_session.add(project)
     await db_session.flush()
     scan = Scan(
-        organization_id=org.id, project_id=project.id,
-        scan_type=ScanType.QUICK, status=ScanStatus.COMPLETED,
-        priority="normal", config={},
+        organization_id=org.id,
+        project_id=project.id,
+        scan_type=ScanType.QUICK,
+        status=ScanStatus.COMPLETED,
+        priority="normal",
+        config={},
     )
     db_session.add(scan)
     await db_session.commit()
@@ -158,77 +169,114 @@ def _url(s):
 
 
 @pytest.mark.asyncio
-async def test_compare_returns_categorized_diff(cmp_setup, client, db_session):
+async def test_compare_returns_identity_link_diff(cmp_setup, client, db_session):
     s = cmp_setup
-    # Seed: 1 persisting, 1 resolved (only baseline), 1 new (only current).
-    persist_fp = "p" + "0" * 63
-    resolved_fp = "r" + "0" * 63
-    new_fp = "n" + "0" * 63
-    db_session.add(_vuln(scan_id=s["baseline"].id, project_id=s["project"].id,
-                         org_id=s["org"].id, fingerprint=persist_fp))
-    db_session.add(_vuln(scan_id=s["baseline"].id, project_id=s["project"].id,
-                         org_id=s["org"].id, fingerprint=resolved_fp))
-    db_session.add(_vuln(scan_id=s["current"].id, project_id=s["project"].id,
-                         org_id=s["org"].id, fingerprint=persist_fp))
-    db_session.add(_vuln(scan_id=s["current"].id, project_id=s["project"].id,
-                         org_id=s["org"].id, fingerprint=new_fp))
+    b, c = s["baseline"], s["current"]
+    b1 = _vuln(
+        scan_id=b.id,
+        project_id=s["project"].id,
+        org_id=s["org"].id,
+        fingerprint="f1",
+        title="persist",
+    )
+    db_session.add(b1)
+    await db_session.flush()
+    c1 = _vuln(
+        scan_id=c.id,
+        project_id=s["project"].id,
+        org_id=s["org"].id,
+        fingerprint="f1",
+        title="persist",
+        previous_id=b1.id,
+    )
+    db_session.add(c1)
+    await db_session.flush()
+    b1.superseded_by_id = c1.id
+    db_session.add_all(
+        [
+            _vuln(
+                scan_id=b.id,
+                project_id=s["project"].id,
+                org_id=s["org"].id,
+                fingerprint="f2",
+                title="fixed",
+                status=VulnerabilityStatus.RESOLVED,
+            ),
+            _vuln(
+                scan_id=b.id,
+                project_id=s["project"].id,
+                org_id=s["org"].id,
+                fingerprint="f3",
+                title="uncovered",
+            ),
+            _vuln(
+                scan_id=c.id,
+                project_id=s["project"].id,
+                org_id=s["org"].id,
+                fingerprint="f4",
+                title="new",
+            ),
+            _vuln(
+                scan_id=c.id,
+                project_id=s["project"].id,
+                org_id=s["org"].id,
+                fingerprint="f5",
+                title="back",
+                regression=True,
+            ),
+        ]
+    )
     await db_session.commit()
 
     r = await client.post(
-        _url(s),
-        json={
-            "baseline_scan_id": str(s["baseline"].id),
-            "current_scan_id": str(s["current"].id),
-        },
+        f"/v1/orgs/{s['org'].id}/scans/compare",
+        json={"baseline_scan_id": str(b.id), "current_scan_id": str(c.id)},
         headers=s["headers"],
     )
     assert r.status_code == 200, r.text
     data = r.json()
-    # Plan-literal assertions:
-    assert "new_vulnerabilities" in data
-    assert "resolved_vulnerabilities" in data
-    assert "persisting_vulnerabilities" in data
-
-    assert {v["fingerprint"] for v in data["new_vulnerabilities"]} == {new_fp}
-    assert {v["fingerprint"] for v in data["resolved_vulnerabilities"]} == {resolved_fp}
-    assert {v["fingerprint"] for v in data["persisting_vulnerabilities"]} == {persist_fp}
-
-
-# ============================================================ 2. summary block
+    assert data["baseline"]["id"] == str(b.id) and data["current"]["id"] == str(c.id)
+    assert [v["title"] for v in data["persisting"]] == ["persist"]
+    assert [v["title"] for v in data["fixed"]] == ["fixed"]
+    assert [v["title"] for v in data["not_covered"]] == ["uncovered"]
+    assert [v["title"] for v in data["new"]] == ["new"]
+    assert [v["title"] for v in data["regressions"]] == ["back"]
+    assert data["summary"] == {
+        "new": 1,
+        "regressions": 1,
+        "persisting": 1,
+        "fixed": 1,
+        "not_covered": 1,
+        "triaged": 0,
+        "truncated": False,
+        "scope_covered": True,
+    }
 
 
 @pytest.mark.asyncio
-async def test_compare_response_has_summary_counts(cmp_setup, client, db_session):
+async def test_compare_defaults_to_previous_same_type_scan(cmp_setup, client):
     s = cmp_setup
-    # Seed: 2 persisting, 1 resolved, 1 new.
-    p1, p2 = "p1" + "0" * 62, "p2" + "0" * 62
-    rfp = "r" + "0" * 63
-    nfp = "n" + "0" * 63
-    for fp in (p1, p2, rfp):
-        db_session.add(_vuln(scan_id=s["baseline"].id, project_id=s["project"].id,
-                             org_id=s["org"].id, fingerprint=fp))
-    for fp in (p1, p2, nfp):
-        db_session.add(_vuln(scan_id=s["current"].id, project_id=s["project"].id,
-                             org_id=s["org"].id, fingerprint=fp))
-    await db_session.commit()
-
     r = await client.post(
-        _url(s),
-        json={
-            "baseline_scan_id": str(s["baseline"].id),
-            "current_scan_id": str(s["current"].id),
-        },
+        f"/v1/orgs/{s['org'].id}/scans/compare",
+        json={"current_scan_id": str(s["current"].id)},
         headers=s["headers"],
     )
     assert r.status_code == 200, r.text
-    summary = r.json()["summary"]
-    assert summary["new_count"] == 1
-    assert summary["resolved_count"] == 1
-    assert summary["persisting_count"] == 2
-    assert summary["truncated"] is False
-
-
-# ============================================================ 3-4. existence
+    assert r.json()["baseline"]["id"] == str(s["baseline"].id)
+    # The oldest scan has nothing before it.
+    r = await client.post(
+        f"/v1/orgs/{s['org'].id}/scans/compare",
+        json={"current_scan_id": str(s["baseline"].id)},
+        headers=s["headers"],
+    )
+    assert r.status_code == 404 and r.json()["detail"] == "no_baseline"
+    # Reversed order is refused.
+    r = await client.post(
+        f"/v1/orgs/{s['org'].id}/scans/compare",
+        json={"baseline_scan_id": str(s["current"].id), "current_scan_id": str(s["baseline"].id)},
+        headers=s["headers"],
+    )
+    assert r.status_code == 409 and r.json()["detail"] == "baseline_not_older"
 
 
 @pytest.mark.asyncio
@@ -291,16 +339,21 @@ async def test_compare_cross_project_returns_409(cmp_setup, client, db_session):
     s = cmp_setup
     # Build a second project + scan in the same org.
     p2 = Project(
-        organization_id=s["org"].id, name="OtherProj",
-        target_url="https://op.example.com", root_domain="example.com",
+        organization_id=s["org"].id,
+        name="OtherProj",
+        target_url="https://op.example.com",
+        root_domain="example.com",
         domain_verified=True,
     )
     db_session.add(p2)
     await db_session.flush()
     other_proj_scan = Scan(
-        organization_id=s["org"].id, project_id=p2.id,
-        scan_type=ScanType.QUICK, status=ScanStatus.COMPLETED,
-        priority="normal", config={},
+        organization_id=s["org"].id,
+        project_id=p2.id,
+        scan_type=ScanType.QUICK,
+        status=ScanStatus.COMPLETED,
+        priority="normal",
+        config={},
     )
     db_session.add(other_proj_scan)
     await db_session.commit()
@@ -384,10 +437,10 @@ async def test_compare_emits_scan_compared_audit(cmp_setup, client, db_session):
     assert r.status_code == 200
 
     audits = (
-        await db_session.execute(
-            select(AuditLog).where(AuditLog.action == "scan.compared")
-        )
-    ).scalars().all()
+        (await db_session.execute(select(AuditLog).where(AuditLog.action == "scan.compared")))
+        .scalars()
+        .all()
+    )
     assert len(audits) == 1
     a = audits[0]
     assert a.actor_id == s["user"].id
@@ -396,6 +449,7 @@ async def test_compare_emits_scan_compared_audit(cmp_setup, client, db_session):
     assert a.details["baseline_scan_id"] == str(s["baseline"].id)
     assert a.details["current_scan_id"] == str(s["current"].id)
     assert a.details["new_count"] == 0
-    assert a.details["resolved_count"] == 0
+    assert a.details["fixed_count"] == 0
     assert a.details["persisting_count"] == 0
+    assert a.details["not_covered_count"] == 0
     assert a.details["truncated"] is False

@@ -1,16 +1,14 @@
-"""Scan comparison request/response schemas (Task 4.6).
+"""Scan comparison request/response schemas (Task 4.6; reworked on
+identity links 2026-11-13 — see services/scan_compare.py).
 
-Request: two scan UUIDs, no other fields. ``extra="forbid"`` for the
-usual loud-rejection discipline.
-
-Response: lightweight projection of ``Vulnerability`` rows (heavy
-fields like description, ai_fix_text, full evidence require a separate
-GET via the M10 read-side cluster), plus a summary block carrying
-counts and the truncation flag.
+``baseline_scan_id`` is optional: omitted, the API picks the project's
+previous finished scan of the same type (the identity pass's own
+baseline). The response names which baseline it used.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -19,8 +17,8 @@ from pydantic import BaseModel, ConfigDict
 class ScanComparisonRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    baseline_scan_id: UUID
     current_scan_id: UUID
+    baseline_scan_id: UUID | None = None
 
 
 class ComparedFindingSummary(BaseModel):
@@ -29,38 +27,48 @@ class ComparedFindingSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    fingerprint: str
+    scan_id: UUID
     title: str
     severity: str
+    status: str
     finding_type: str
     cwe_id: str | None
     target_url: str | None
+    first_seen_at: datetime | None
+    resolved_at: datetime | None
+    regression: bool
+
+
+class ComparedScan(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    scan_type: str
+    status: str
+    created_at: datetime
+    completed_at: datetime | None
 
 
 class ComparisonSummary(BaseModel):
-    """Counts + truncation flag at the top of the response.
-
-    ``truncated=True`` means at least one category hit the
-    ``MAX_FINDINGS_PER_CATEGORY`` cap. The route handler also emits
-    a logger.warning when this flag fires — operational signal for
-    capacity planning (if it fires regularly, raise cap or ship
-    pagination earlier than M10).
-    """
-
-    new_count: int
-    resolved_count: int
-    persisting_count: int
+    new: int
+    regressions: int
+    persisting: int
+    fixed: int
+    not_covered: int
+    triaged: int
     truncated: bool
+    # False when the current scan's scope (depth, template tags) is
+    # narrower than the baseline's: a large not_covered bucket is then
+    # expected, and nothing in it was auto-resolved.
+    scope_covered: bool
 
 
 class ScanComparisonResponse(BaseModel):
-    """200 body. The three list fields ALSO appear at top level (per
-    plan-literal `data["new_vulnerabilities"]` assertion shape) — the
-    ``summary`` envelope is additive."""
-
-    baseline_scan_id: UUID
-    current_scan_id: UUID
+    baseline: ComparedScan
+    current: ComparedScan
     summary: ComparisonSummary
-    new_vulnerabilities: list[ComparedFindingSummary]
-    resolved_vulnerabilities: list[ComparedFindingSummary]
-    persisting_vulnerabilities: list[ComparedFindingSummary]
+    new: list[ComparedFindingSummary]
+    regressions: list[ComparedFindingSummary]
+    persisting: list[ComparedFindingSummary]
+    fixed: list[ComparedFindingSummary]
+    not_covered: list[ComparedFindingSummary]

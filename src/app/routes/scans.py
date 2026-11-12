@@ -84,6 +84,7 @@ from app.schemas.scans import (
 )
 from app.schemas.scan_compare import (
     ComparedFindingSummary,
+    ComparedScan,
     ComparisonSummary,
     ScanComparisonRequest,
     ScanComparisonResponse,
@@ -96,7 +97,7 @@ from app.services.plan_enforcement import (
     require_scan_capacity,
 )
 from app.services.plans import record_scan_usage
-from app.services.scan_compare import compute_diff
+from app.services.scan_compare import MAX_FINDINGS_PER_CATEGORY, compute_diff, default_baseline
 from app.services.scan_queue import (
     ProgressSubscriber,
     apply_cancel_state,
@@ -130,12 +131,8 @@ scan_router = APIRouter(
 
 
 _NOT_FOUND = HTTPException(status_code=404, detail="not_found")
-_DOMAIN_NOT_VERIFIED = HTTPException(
-    status_code=403, detail="domain_not_verified"
-)
-_SCAN_ALREADY_TERMINAL = HTTPException(
-    status_code=409, detail="scan_already_terminal"
-)
+_DOMAIN_NOT_VERIFIED = HTTPException(status_code=403, detail="domain_not_verified")
+_SCAN_ALREADY_TERMINAL = HTTPException(status_code=409, detail="scan_already_terminal")
 # Source-Ingestion Fix (TOOL-ARCH §3.2 addendum 9d6ab25):
 # raised when a ScanType requires source acquisition but the bound
 # project has no ``source_repo_url`` configured. Repairs the Drift
@@ -144,26 +141,28 @@ _SCAN_ALREADY_TERMINAL = HTTPException(
 # cross-field check (ScanCreateRequest has no Project reference);
 # enforcement lives at the route handler where Project is already
 # loaded.
-_SOURCE_REPO_URL_REQUIRED = HTTPException(
-    status_code=422, detail="source_repo_url_required"
-)
+_SOURCE_REPO_URL_REQUIRED = HTTPException(status_code=422, detail="source_repo_url_required")
 
 
 # Active scan states — cancel is meaningful.
-_ACTIVE_STATES: frozenset[ScanStatus] = frozenset({
-    ScanStatus.QUEUED,
-    ScanStatus.RECONNING,
-    ScanStatus.RUNNING,
-    ScanStatus.ANALYZING,
-})
+_ACTIVE_STATES: frozenset[ScanStatus] = frozenset(
+    {
+        ScanStatus.QUEUED,
+        ScanStatus.RECONNING,
+        ScanStatus.RUNNING,
+        ScanStatus.ANALYZING,
+    }
+)
 
 # Terminal-final states — cancel is a no-op past these (the work
 # already concluded, not by user intent). 409 to signal the conflict.
-_TERMINAL_FINAL: frozenset[ScanStatus] = frozenset({
-    ScanStatus.COMPLETED,
-    ScanStatus.PARTIAL,
-    ScanStatus.FAILED,
-})
+_TERMINAL_FINAL: frozenset[ScanStatus] = frozenset(
+    {
+        ScanStatus.COMPLETED,
+        ScanStatus.PARTIAL,
+        ScanStatus.FAILED,
+    }
+)
 
 # Scan types that bypass the domain-verified gate. Mobile = uploaded
 # artifact is the bound asset. Container = image is the bound asset.
@@ -184,10 +183,12 @@ _DOMAIN_VERIFY_BYPASS: frozenset[ScanType] = frozenset(
 # duplicated here to avoid a routes-side import of an orchestrator
 # private symbol. Single source of truth for the set membership is
 # the orchestrator constant.
-_SOURCE_REQUIRING_SCAN_TYPES: frozenset[ScanType] = frozenset({
-    ScanType.FULL_WEB_SOURCE,
-    ScanType.FULL_SPECTRUM,
-})
+_SOURCE_REQUIRING_SCAN_TYPES: frozenset[ScanType] = frozenset(
+    {
+        ScanType.FULL_WEB_SOURCE,
+        ScanType.FULL_SPECTRUM,
+    }
+)
 
 
 @project_scans_router.post(
@@ -217,10 +218,7 @@ async def create_scan(
         raise _NOT_FOUND
 
     # Step 4: domain-verified gate (Pydantic already rejected PUBLIC).
-    if (
-        body.scan_type not in _DOMAIN_VERIFY_BYPASS
-        and not project.domain_verified
-    ):
+    if body.scan_type not in _DOMAIN_VERIFY_BYPASS and not project.domain_verified:
         raise _DOMAIN_NOT_VERIFIED
 
     # Step 4b: source-acquisition prerequisite gate per Source-Ingestion
@@ -230,10 +228,7 @@ async def create_scan(
     # engine-clones lock; without a URL the dispatch would silently
     # no-op (Drift #54). Q-FAILURE-MODE hard-fail at the request-
     # validation layer.
-    if (
-        body.scan_type in _SOURCE_REQUIRING_SCAN_TYPES
-        and not project.source_repo_url
-    ):
+    if body.scan_type in _SOURCE_REQUIRING_SCAN_TYPES and not project.source_repo_url:
         raise _SOURCE_REPO_URL_REQUIRED
 
     # Step 5: mobile-upload validation (when applicable).
@@ -377,9 +372,7 @@ async def cancel_scan(
         raise _SCAN_ALREADY_TERMINAL
 
     actor_id = identity.user.id if identity.user is not None else None
-    api_key_prefix = (
-        identity.api_key.key_prefix if identity.api_key is not None else None
-    )
+    api_key_prefix = identity.api_key.key_prefix if identity.api_key is not None else None
 
     # Shared kernel: flip state + emit SCAN_CANCELED audit (Drift #51
     # rule-of-three extraction at services/scan_queue.py).
@@ -396,9 +389,7 @@ async def cancel_scan(
 
     # Publish cancel signal to Redis post-commit. Fire-and-forget per
     # visible-failure discipline (durable PG state is source of truth).
-    await publish_cancel_signal(
-        redis, str(scan_id), reason="user_requested", logger=logger
-    )
+    await publish_cancel_signal(redis, str(scan_id), reason="user_requested", logger=logger)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -415,124 +406,92 @@ async def compare_scans(
     identity: AuthIdentity = Depends(require_org_membership()),
     db: AsyncSession = Depends(get_db),
 ):
-    """Compare two scans by vulnerability fingerprint (Task 4.6).
+    """Compare a scan with a baseline on identity links (Task 4.6,
+    reworked 2026-11-13 — services/scan_compare.py).
 
-    Returns three categorized lists — new (current only), resolved
-    (baseline only), persisting (both) — plus a summary block with
-    counts + truncation flag.
-
-    Validation chain:
-      1. require_org_membership dep — path.org_id ↔ identity → 404
-      2. Pydantic ScanComparisonRequest — body shape → 422
-      3. Lookup BOTH scans WHERE id IN (...) AND org_id matches.
-         <2 rows → 404 (existence-hiding for cross-tenant scan_id)
-      4. Same-project guard: project_id must match → 409
-         scans_project_mismatch
-      5. Terminal-state guard: both scans in {COMPLETED, PARTIAL}
-         → else 409 scan_not_terminal (FAILED, CANCELED, and active
-         states all rejected — fake-resolved-findings prevention)
-      6. compute_diff (services/scan_compare.py) partitions by
-         fingerprint; MAX_FINDINGS_PER_CATEGORY cap respected
-      7. Emit SCAN_COMPARED audit (only DB write — read-only otherwise)
-      8. 200 ScanComparisonResponse
-
-    Auth: any-member (JWT or API key) — symmetric with scan-create
-    + cancel.
+    ``baseline_scan_id`` omitted → the project's previous finished scan
+    of the same type; none → 404 ``no_baseline``. Both scans must be in
+    this org (404 otherwise, existence-hiding), the same project (409
+    ``scans_project_mismatch``), terminal (409 ``scan_not_terminal``)
+    and the baseline older than the current (409 ``baseline_not_older``).
+    Read-only apart from the SCAN_COMPARED audit row.
     """
-    # Step 3: lookup both scans in ONE query (org-scoped via WHERE
-    # for defense-in-depth on top of RLS).
-    scans = (
+    current = (
         await db.execute(
-            select(Scan).where(
-                Scan.id.in_([body.baseline_scan_id, body.current_scan_id]),
-                Scan.organization_id == org_id,
-            )
+            select(Scan).where(Scan.id == body.current_scan_id, Scan.organization_id == org_id)
         )
-    ).scalars().all()
-    by_id = {s.id: s for s in scans}
-    baseline = by_id.get(body.baseline_scan_id)
-    current = by_id.get(body.current_scan_id)
-    if baseline is None or current is None:
-        # 404 covers both "doesn't exist" and "exists but in another
-        # tenant" — same existence-hiding discipline as Task 4.5 cancel.
+    ).scalar_one_or_none()
+    if current is None:
         raise _NOT_FOUND
-
-    # Step 4: same-project guard. Cross-project comparison is a niche
-    # use case; rejecting now keeps the contract narrow. Removing
-    # later is an additive change.
-    if baseline.project_id != current.project_id:
-        raise HTTPException(
-            status_code=409, detail="scans_project_mismatch"
-        )
-
-    # Step 5: terminal-state guard. FAILED + CANCELED + active states
-    # all rejected — comparing against incomplete data reports fake
-    # "resolved" findings (vulnerabilities not yet discovered or
-    # aborted), not actually resolved. PARTIAL is the right boundary
-    # because some jobs ran successfully.
     _COMPARE_OK = {ScanStatus.COMPLETED, ScanStatus.PARTIAL}
-    if baseline.status not in _COMPARE_OK or current.status not in _COMPARE_OK:
-        raise HTTPException(
-            status_code=409, detail="scan_not_terminal"
-        )
+    if current.status not in _COMPARE_OK:
+        raise HTTPException(status_code=409, detail="scan_not_terminal")
 
-    # Step 6: compute diff.
-    new_vulns, resolved_vulns, persisting_vulns, truncated = await compute_diff(
-        db, body.baseline_scan_id, body.current_scan_id
-    )
+    if body.baseline_scan_id is None:
+        baseline = await default_baseline(db, current)
+        if baseline is None:
+            raise HTTPException(status_code=404, detail="no_baseline")
+    else:
+        baseline = (
+            await db.execute(
+                select(Scan).where(Scan.id == body.baseline_scan_id, Scan.organization_id == org_id)
+            )
+        ).scalar_one_or_none()
+        if baseline is None:
+            raise _NOT_FOUND
+        if baseline.project_id != current.project_id:
+            raise HTTPException(status_code=409, detail="scans_project_mismatch")
+        if baseline.status not in _COMPARE_OK:
+            raise HTTPException(status_code=409, detail="scan_not_terminal")
+        if baseline.created_at >= current.created_at:
+            raise HTTPException(status_code=409, detail="baseline_not_older")
 
-    if truncated:
-        # Operational signal for capacity planning. Not an error.
-        from app.services.scan_compare import MAX_FINDINGS_PER_CATEGORY
+    diff = await compute_diff(db, baseline, current)
+    if diff.truncated:
         logger.warning(
-            "scan_compare hit category cap of %d for org=%s, "
-            "baseline=%s, current=%s",
+            "scan_compare hit category cap of %d for org=%s, baseline=%s, current=%s",
             MAX_FINDINGS_PER_CATEGORY,
             org_id,
-            body.baseline_scan_id,
-            body.current_scan_id,
+            baseline.id,
+            current.id,
         )
 
-    # Step 7: audit emission. Compare is read-only; this is the only
-    # DB write. resource_id is the current scan (the "newer" of the
-    # two); baseline is in details so the audit row is self-explanatory.
     actor_id = identity.user.id if identity.user is not None else None
     audit_details: dict = {
-        "baseline_scan_id": str(body.baseline_scan_id),
-        "current_scan_id": str(body.current_scan_id),
-        "new_count": len(new_vulns),
-        "resolved_count": len(resolved_vulns),
-        "persisting_count": len(persisting_vulns),
-        "truncated": truncated,
+        "baseline_scan_id": str(baseline.id),
+        "current_scan_id": str(current.id),
+        **{f"{k}_count": n for k, n in diff.counts().items()},
+        "truncated": diff.truncated,
     }
     if identity.api_key is not None:
         audit_details["api_key_prefix"] = identity.api_key.key_prefix
-
     await audit(
         db,
         organization_id=org_id,
         actor_id=actor_id,
         action=ScanAction.SCAN_COMPARED,
         resource_type="scan",
-        resource_id=body.current_scan_id,
+        resource_id=current.id,
         ip_address=get_real_ip(request),
         user_agent=request.headers.get("User-Agent"),
         details=audit_details,  # type: ignore[arg-type]
     )
     await db.commit()
 
+    def _rows(vs: list[Vulnerability]) -> list[ComparedFindingSummary]:
+        return [ComparedFindingSummary.model_validate(v) for v in vs]
+
     return ScanComparisonResponse(
-        baseline_scan_id=body.baseline_scan_id,
-        current_scan_id=body.current_scan_id,
+        baseline=ComparedScan.model_validate(baseline),
+        current=ComparedScan.model_validate(current),
         summary=ComparisonSummary(
-            new_count=len(new_vulns),
-            resolved_count=len(resolved_vulns),
-            persisting_count=len(persisting_vulns),
-            truncated=truncated,
+            **diff.counts(), truncated=diff.truncated, scope_covered=diff.scope_covered
         ),
-        new_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in new_vulns],
-        resolved_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in resolved_vulns],
-        persisting_vulnerabilities=[ComparedFindingSummary.model_validate(v) for v in persisting_vulns],
+        new=_rows(diff.new),
+        regressions=_rows(diff.regressions),
+        persisting=_rows(diff.persisting),
+        fixed=_rows(diff.fixed),
+        not_covered=_rows(diff.not_covered),
     )
 
 
@@ -559,9 +518,7 @@ _JOB_TERMINAL_STATUSES = ("completed", "failed", "canceled")
 _E = TypeVar("_E", bound=Enum)
 
 
-def _parse_csv_values(
-    raw: str | None, enum_cls: type[_E], param: str
-) -> list[_E] | None:
+def _parse_csv_values(raw: str | None, enum_cls: type[_E], param: str) -> list[_E] | None:
     """CSV query param → enum members; 422 on an unknown token (M10.A Q2)."""
     if raw is None:
         return None
@@ -573,9 +530,7 @@ def _parse_csv_values(
         try:
             members.append(enum_cls(token))
         except ValueError:
-            raise HTTPException(
-                status_code=422, detail=f"invalid {param} value: {token}"
-            ) from None
+            raise HTTPException(status_code=422, detail=f"invalid {param} value: {token}") from None
     return members or None
 
 
@@ -591,9 +546,7 @@ async def _scan_rollups(
             select(
                 ScanJob.scan_id,
                 func.count(ScanJob.id),
-                func.count(ScanJob.id).filter(
-                    ScanJob.status.in_(_JOB_TERMINAL_STATUSES)
-                ),
+                func.count(ScanJob.id).filter(ScanJob.status.in_(_JOB_TERMINAL_STATUSES)),
             )
             .where(ScanJob.scan_id.in_(scan_ids))
             .group_by(ScanJob.scan_id)
@@ -643,16 +596,11 @@ async def _paginated_scans(
     total = (await db.execute(count_stmt)).scalar_one()
 
     col = _SCAN_SORT_COLUMNS[sort_key]
-    stmt = (
-        select(Scan, Project.name)
-        .join(Project, Project.id == Scan.project_id)
-    )
+    stmt = select(Scan, Project.name).join(Project, Project.id == Scan.project_id)
     for clause in where:
         stmt = stmt.where(clause)
     # Deterministic secondary key so equal timestamps page stably.
-    stmt = stmt.order_by(
-        col.desc() if descending else col.asc(), Scan.id.desc()
-    )
+    stmt = stmt.order_by(col.desc() if descending else col.asc(), Scan.id.desc())
     stmt = stmt.offset((page - 1) * per_page).limit(per_page)
     rows = (await db.execute(stmt)).all()
 
@@ -738,9 +686,7 @@ async def list_project_scans(
     as an empty-but-valid list."""
     exists = (
         await db.execute(
-            select(Project.id).where(
-                Project.id == project_id, Project.organization_id == org_id
-            )
+            select(Project.id).where(Project.id == project_id, Project.organization_id == org_id)
         )
     ).scalar_one_or_none()
     if exists is None:
@@ -779,17 +725,17 @@ async def get_scan(
     scan, project_name, target_url = row
 
     job_rows = (
-        await db.execute(
-            select(ScanJob)
-            .where(ScanJob.scan_id == scan_id)
-            .order_by(ScanJob.engine.asc())
+        (
+            await db.execute(
+                select(ScanJob).where(ScanJob.scan_id == scan_id).order_by(ScanJob.engine.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     raw_count = (
-        await db.execute(
-            select(func.count(RawFinding.id)).where(RawFinding.scan_id == scan_id)
-        )
+        await db.execute(select(func.count(RawFinding.id)).where(RawFinding.scan_id == scan_id))
     ).scalar_one()
 
     sev_rows = (
@@ -800,9 +746,7 @@ async def get_scan(
         )
     ).all()
     counts = {sev.value: int(n) for sev, n in sev_rows}
-    severity_counts = SeverityCounts(
-        **{s.value: counts.get(s.value, 0) for s in Severity}
-    )
+    severity_counts = SeverityCounts(**{s.value: counts.get(s.value, 0) for s in Severity})
 
     return ScanDetailResponse(
         id=scan.id,
@@ -1011,16 +955,13 @@ async def stream_scan_progress(
     async def _instrumented():
         events_sent = 0
         try:
-            async for event in progress_generator(
-                redis, str(scan_id), last_event_id
-            ):
+            async for event in progress_generator(redis, str(scan_id), last_event_id):
                 yield event
                 events_sent += 1
         finally:
             duration = time.time() - start_ts
             logger.info(
-                "sse_progress_disconnected scan_id=%s "
-                "duration_seconds=%.1f events_sent=%d",
+                "sse_progress_disconnected scan_id=%s duration_seconds=%.1f events_sent=%d",
                 scan_id,
                 duration,
                 events_sent,
@@ -1084,11 +1025,7 @@ async def get_attack_surface(
     # AttackSurface rows for this scan (RLS-scoped via the org GUC the
     # auth dependency set; explicit scan_id filter narrows further).
     surface_rows = list(
-        (
-            await db.execute(
-                select(AttackSurface).where(AttackSurface.scan_id == scan_id)
-            )
-        ).scalars()
+        (await db.execute(select(AttackSurface).where(AttackSurface.scan_id == scan_id))).scalars()
     )
 
     # Y4: empty payload when no recon rows exist. root_domain is resolved
@@ -1096,9 +1033,7 @@ async def get_attack_surface(
     # (avoids an async lazy-load on scan.project).
     if not surface_rows:
         root_domain = (
-            await db.execute(
-                select(Project.target_url).where(Project.id == scan.project_id)
-            )
+            await db.execute(select(Project.target_url).where(Project.id == scan.project_id))
         ).scalar_one_or_none() or ""
         return AttackSurfaceResponse(
             root_domain=root_domain,
@@ -1125,19 +1060,13 @@ async def get_attack_surface(
             .group_by(Vulnerability.target_url)
         )
     ).all()
-    vuln_counts: dict[str, int] = {
-        target_url: count for target_url, count in vuln_count_rows
-    }
+    vuln_counts: dict[str, int] = {target_url: count for target_url, count in vuln_count_rows}
 
     # Y1: aggregate counts — timeout bucketed as dead; row-level status
     # preserved in the per-subdomain entries below.
-    live_count = sum(
-        1 for row in surface_rows if row.status == SubdomainStatus.LIVE
-    )
+    live_count = sum(1 for row in surface_rows if row.status == SubdomainStatus.LIVE)
     dead_count = sum(
-        1
-        for row in surface_rows
-        if row.status in {SubdomainStatus.DEAD, SubdomainStatus.TIMEOUT}
+        1 for row in surface_rows if row.status in {SubdomainStatus.DEAD, SubdomainStatus.TIMEOUT}
     )
 
     subdomains = [

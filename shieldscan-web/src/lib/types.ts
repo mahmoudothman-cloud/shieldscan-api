@@ -568,3 +568,47 @@ export interface SubscriptionView {
   pending_checkout: boolean;
   invoices: InvoiceView[];
 }
+
+// ---------------------------------------------------------------- scan comparison (identity links)
+
+export interface ComparedFinding {
+  id: string;
+  scan_id: string;
+  title: string;
+  severity: Severity;
+  status: VulnerabilityStatus;
+  finding_type: string;
+  cwe_id: string | null;
+  target_url: string | null;
+  first_seen_at: string | null;
+  resolved_at: string | null;
+  regression: boolean;
+}
+
+export interface ComparedScan {
+  id: string;
+  scan_type: string;
+  status: ScanStatus;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface ScanComparison {
+  baseline: ComparedScan;
+  current: ComparedScan;
+  summary: {
+    new: number;
+    regressions: number;
+    persisting: number;
+    fixed: number;
+    not_covered: number;
+    triaged: number;
+    truncated: boolean;
+    scope_covered: boolean;
+  };
+  new: ComparedFinding[];
+  regressions: ComparedFinding[];
+  persisting: ComparedFinding[];
+  fixed: ComparedFinding[];
+  not_covered: ComparedFinding[];
+}
