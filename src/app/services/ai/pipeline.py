@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.raw_findings import RawFinding
 from app.models.scans import Scan
 from app.models.vulnerabilities import Vulnerability
+from app.services.compliance.frameworks import normalize_cwe
 from app.services.plan_enforcement import feature_on
 from app.services.plans import resolve_limits
 from app.services.vulnerability_identity import reconcile_scan_history
@@ -277,7 +278,7 @@ async def _create_vulnerability_from_finding(
         finding_type=finding.finding_type,
         engine_category=finding.engine_category,
         target_url=finding.target_url,
-        cwe_id=finding.cwe_id,
+        cwe_id=normalize_cwe(finding.cwe_id),  # M14: one spelling on the vulnerability side
         fingerprint=finding.fingerprint,
         qdrant_point_id=point_id,
         raw_finding_ids=[finding.id],

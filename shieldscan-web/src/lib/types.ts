@@ -387,6 +387,7 @@ export interface FrameworkCatalog {
     slug: string;
     name: string;
     version: string;
+    in_plan?: boolean;
     controls: Array<{ control_id: string; title: string; description: string | null }>;
   }>;
 }

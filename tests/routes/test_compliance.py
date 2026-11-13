@@ -100,7 +100,7 @@ async def test_list_frameworks(client, compliance_org):
     r = await client.get(f"/v1/orgs/{org.id}/compliance/frameworks", headers=headers)
     assert r.status_code == 200
     by_slug = {f["slug"]: f for f in r.json()["frameworks"]}
-    assert set(by_slug) == {"soc2", "iso27001"}
+    assert set(by_slug) == {"soc2", "iso27001", "egypt_pdpl", "pci_dss"}
     assert by_slug["iso27001"]["version"] == "2013"
     assert len(by_slug["soc2"]["controls"]) == 6
 
@@ -123,7 +123,7 @@ async def test_scan_posture_three_states(client, db_session, compliance_org):
     states = _states(r.json())
     assert states["CC6.1"] == "fail"          # CWE-89 maps to CC6.1
     assert states["CC6.6"] == "pass"          # mapped (CWE-434) but not hit
-    assert states["CC7.2"] == "not_assessed"  # no CWE mapping at all
+    assert states["CC8.1"] == "not_assessed"  # no CWE mapping at all
     summary = r.json()["summary"]
     assert summary["fail"] >= 1 and summary["not_assessed"] >= 1
 
@@ -137,7 +137,7 @@ async def test_scan_posture_empty_scan(client, compliance_org):
     assert r.status_code == 200
     states = _states(r.json())
     assert states["CC6.1"] == "pass"          # mapped, no finding
-    assert states["CC7.2"] == "not_assessed"  # unmappable
+    assert states["CC8.1"] == "not_assessed"  # unmappable
     assert "fail" not in states.values()
 
 
@@ -194,7 +194,7 @@ async def test_org_posture_aggregate(client, db_session, compliance_org):
     by_slug = {f["slug"]: f for f in r.json()["frameworks"]}
     soc2_states = {c["control_id"]: c["state"] for c in by_slug["soc2"]["controls"]}
     assert soc2_states["CC6.1"] == "fail"          # any org scan hits it → org fail
-    assert soc2_states["CC7.2"] == "not_assessed"
+    assert soc2_states["CC8.1"] == "not_assessed"
 
 
 @pytest.mark.asyncio

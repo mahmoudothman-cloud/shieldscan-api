@@ -33,6 +33,7 @@ export default function Compliance() {
   if (posture.isPending) return <Spinner label="Computing posture" />;
   if (posture.isError) return <Alert tone="error">Couldn't load compliance posture.</Alert>;
 
+  const lockedFrameworks = (catalog.data?.frameworks ?? []).filter((f) => f.in_plan === false);
   const descriptions = new Map<string, string | null>();
   for (const fw of catalog.data?.frameworks ?? [])
     for (const c of fw.controls) descriptions.set(`${fw.slug}:${c.control_id}`, c.description);
@@ -76,6 +77,14 @@ export default function Compliance() {
           <FrameworkCard key={fw.slug} fw={fw} filter={filter} descriptions={descriptions} />
         ))}
       </div>
+      {lockedFrameworks.length > 0 && (
+        <p className="text-sm text-ink-3">
+          Not in your plan: {lockedFrameworks.map((f) => f.name).join(", ")}.{" "}
+          <Link to="/settings/billing" className="text-brand underline">
+            See plans
+          </Link>
+        </p>
+      )}
     </div>
   );
 }

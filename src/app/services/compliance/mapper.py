@@ -27,6 +27,7 @@ from app.models.compliance import (
     CweControlMapping,
 )
 from app.models.vulnerabilities import Vulnerability, VulnerabilityStatus
+from app.services.compliance.frameworks import normalize_cwe
 
 
 class ControlState(str, Enum):
@@ -41,16 +42,10 @@ class FrameworkNotFoundError(LookupError):
 
 async def _assessable_control_ids(db: AsyncSession) -> set[UUID]:
     """Control ids that have ≥1 CWE mapping (across all frameworks)."""
-    return set(
-        (
-            await db.execute(select(CweControlMapping.control_id).distinct())
-        ).scalars().all()
-    )
+    return set((await db.execute(select(CweControlMapping.control_id).distinct())).scalars().all())
 
 
-def _control_state(
-    control_id: UUID, hit: set[UUID], assessable: set[UUID]
-) -> ControlState:
+def _control_state(control_id: UUID, hit: set[UUID], assessable: set[UUID]) -> ControlState:
     if control_id in hit:
         return ControlState.FAIL
     if control_id in assessable:
@@ -68,40 +63,41 @@ def _summarise(states: list[ControlState]) -> dict[str, int]:
 
 
 async def _hit_control_ids(db: AsyncSession, cwes: set[str]) -> set[UUID]:
+    # Findings carry CWE ids in whatever form the engine emitted ("264",
+    # "cwe-200", "CWE-310", "-1"); the map is keyed by the normalised form.
+    cwes = {n for n in (normalize_cwe(c) for c in cwes if c is not None) if n is not None}
     if not cwes:
         return set()
     return set(
         (
             await db.execute(
-                select(CweControlMapping.control_id).where(
-                    CweControlMapping.cwe_id.in_(cwes)
-                )
+                select(CweControlMapping.control_id).where(CweControlMapping.cwe_id.in_(cwes))
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
 
 
-async def compute_scan_posture(
-    *, db: AsyncSession, scan_id: UUID, framework_slug: str
-) -> dict:
+async def compute_scan_posture(*, db: AsyncSession, scan_id: UUID, framework_slug: str) -> dict:
     """Per-control three-state posture for one scan against one framework."""
     framework = (
         await db.execute(
-            select(ComplianceFramework).where(
-                ComplianceFramework.slug == framework_slug
-            )
+            select(ComplianceFramework).where(ComplianceFramework.slug == framework_slug)
         )
     ).scalar_one_or_none()
     if framework is None:
         raise FrameworkNotFoundError(framework_slug)
 
     controls = (
-        await db.execute(
-            select(ComplianceControl).where(
-                ComplianceControl.framework_id == framework.id
+        (
+            await db.execute(
+                select(ComplianceControl).where(ComplianceControl.framework_id == framework.id)
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     scan_cwes = set(
         (
@@ -111,7 +107,9 @@ async def compute_scan_posture(
                     Vulnerability.cwe_id.is_not(None),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     hit = await _hit_control_ids(db, scan_cwes)
     assessable = await _assessable_control_ids(db)
@@ -121,9 +119,7 @@ async def compute_scan_posture(
     for c in controls:
         state = _control_state(c.id, hit, assessable)
         states.append(state)
-        control_results.append(
-            {"control_id": c.control_id, "title": c.title, "state": state.value}
-        )
+        control_results.append({"control_id": c.control_id, "title": c.title, "state": state.value})
 
     return {
         "framework": {
@@ -159,24 +155,26 @@ async def compute_org_posture(*, db: AsyncSession, org_id: UUID) -> dict:
                     Vulnerability.cwe_id.is_not(None),
                 )
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     hit = await _hit_control_ids(db, org_cwes)
     assessable = await _assessable_control_ids(db)
 
-    frameworks = (
-        await db.execute(select(ComplianceFramework))
-    ).scalars().all()
+    frameworks = (await db.execute(select(ComplianceFramework))).scalars().all()
 
     framework_results = []
     for framework in frameworks:
         controls = (
-            await db.execute(
-                select(ComplianceControl).where(
-                    ComplianceControl.framework_id == framework.id
+            (
+                await db.execute(
+                    select(ComplianceControl).where(ComplianceControl.framework_id == framework.id)
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         states = [_control_state(c.id, hit, assessable) for c in controls]
         framework_results.append(
             {
