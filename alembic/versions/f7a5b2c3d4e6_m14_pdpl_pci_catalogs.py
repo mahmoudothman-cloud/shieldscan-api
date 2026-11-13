@@ -388,7 +388,8 @@ def upgrade() -> None:
             conn.execute(
                 sa.text(
                     "INSERT INTO compliance_frameworks (id, slug, name, version, created_at, updated_at) "
-                    "VALUES (:id, :slug, :name, :version, :now, :now)"
+                    "VALUES (CAST(:id AS UUID), :slug, :name, :version, "
+                    "CAST(:now AS TIMESTAMPTZ), CAST(:now AS TIMESTAMPTZ))"
                 ),
                 {"id": uuid.uuid4(), "slug": slug, "name": name, "version": version, "now": now},
             )
@@ -399,7 +400,7 @@ def upgrade() -> None:
         for control_id, title, description in controls:
             exists = conn.execute(
                 sa.text(
-                    "SELECT id FROM compliance_controls WHERE framework_id = :fw AND control_id = :cid"
+                    "SELECT id FROM compliance_controls WHERE framework_id = CAST(:fw AS UUID) AND control_id = :cid"
                 ),
                 {"fw": fw_id, "cid": control_id},
             ).scalar()
@@ -408,7 +409,8 @@ def upgrade() -> None:
                     sa.text(
                         "INSERT INTO compliance_controls "
                         "(id, framework_id, control_id, title, description, created_at, updated_at) "
-                        "VALUES (:id, :fw, :cid, :title, :desc, :now, :now)"
+                        "VALUES (CAST(:id AS UUID), CAST(:fw AS UUID), :cid, :title, :desc, "
+                        "CAST(:now AS TIMESTAMPTZ), CAST(:now AS TIMESTAMPTZ))"
                     ),
                     {
                         "id": uuid.uuid4(),
@@ -423,10 +425,12 @@ def upgrade() -> None:
         conn.execute(
             sa.text(
                 "INSERT INTO cwe_control_mappings (id, cwe_id, control_id, created_at, updated_at) "
-                "SELECT :id, :cwe, c.id, :now, :now FROM compliance_controls c "
+                "SELECT CAST(:id AS UUID), CAST(:cwe AS VARCHAR), c.id, "
+                "CAST(:now AS TIMESTAMPTZ), CAST(:now AS TIMESTAMPTZ) FROM compliance_controls c "
                 "JOIN compliance_frameworks f ON f.id = c.framework_id "
                 "WHERE f.slug = :slug AND c.control_id = :cid "
-                "AND NOT EXISTS (SELECT 1 FROM cwe_control_mappings m WHERE m.cwe_id = :cwe AND m.control_id = c.id)"
+                "AND NOT EXISTS (SELECT 1 FROM cwe_control_mappings m "
+                "WHERE m.cwe_id = CAST(:cwe AS VARCHAR) AND m.control_id = c.id)"
             ),
             {"id": uuid.uuid4(), "cwe": cwe_id, "slug": slug, "cid": control_id, "now": now},
         )
