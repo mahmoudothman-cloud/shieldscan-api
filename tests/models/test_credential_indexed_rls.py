@@ -83,7 +83,7 @@ async def test_only_api_keys_is_in_the_carve_out(db_session):
     team to look at ADR-012 before approving.
     """
     # First half: the enumeration itself hasn't quietly drifted.
-    assert set(CREDENTIAL_INDEXED_TABLES.keys()) == {"api_keys"}, (
+    assert set(CREDENTIAL_INDEXED_TABLES.keys()) == {"api_keys", "agents"}, (
         "CREDENTIAL_INDEXED_TABLES has changed — this requires an ADR "
         "amendment, not just a code change. See ADR-012 + policies.py."
     )

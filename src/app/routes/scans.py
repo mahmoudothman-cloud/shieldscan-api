@@ -91,6 +91,8 @@ from app.schemas.scan_compare import (
 )
 from app.services.audit import ScanAction, audit
 from app.services.orchestrator import ScanOrchestrator
+from app.models.agents import Agent, AgentStatus
+from app.services.agents import is_offline as is_agent_offline
 from app.services.plan_enforcement import (
     clamp_subdomain_limit,
     require_feature,
@@ -173,6 +175,13 @@ _TERMINAL_FINAL: frozenset[ScanStatus] = frozenset(
 # behind DNS verification protects nothing; an unverified project can
 # run quick scans while the owner sets up the TXT record. Full scans
 # stay gated.
+# M14: the agent runs the native tool subset (nuclei, httpx, subfinder,
+# sslyze, nikto, wapiti, nmap); scan types needing MobSF, trivy, semgrep,
+# zap etc. stay cloud-only.
+_AGENT_UNSUPPORTED_SCAN_TYPES: frozenset[ScanType] = frozenset(
+    {ScanType.MOBILE, ScanType.CONTAINER, ScanType.FULL_WEB_SOURCE, ScanType.FULL_SPECTRUM}
+)
+
 _DOMAIN_VERIFY_BYPASS: frozenset[ScanType] = frozenset(
     {ScanType.MOBILE, ScanType.CONTAINER, ScanType.QUICK}
 )
@@ -218,8 +227,37 @@ async def create_scan(
         raise _NOT_FOUND
 
     # Step 4: domain-verified gate (Pydantic already rejected PUBLIC).
-    if body.scan_type not in _DOMAIN_VERIFY_BYPASS and not project.domain_verified:
+    # M14: an agent-bound project is authorised by the agent's enrolment
+    # (On-Prem Agent Design v1.0 A5) — DNS cannot verify 10.0.0.5.
+    if (
+        body.scan_type not in _DOMAIN_VERIFY_BYPASS
+        and not project.domain_verified
+        and project.agent_id is None
+    ):
         raise _DOMAIN_NOT_VERIFIED
+
+    # Step 4a (M14): an agent-bound project needs its agent online, or the
+    # scan would sit in a queue nobody reads. Fail at once, with the reason.
+    if project.agent_id is not None:
+        agent = (
+            await db.execute(
+                select(Agent).where(Agent.id == project.agent_id, Agent.organization_id == org_id)
+            )
+        ).scalar_one_or_none()
+        if agent is None or agent.status != AgentStatus.ACTIVE or is_agent_offline(agent):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "agent_offline",
+                    "agent_id": str(project.agent_id),
+                    "agent_name": agent.name if agent is not None else None,
+                    "last_seen_at": agent.last_seen_at.isoformat()
+                    if agent is not None and agent.last_seen_at
+                    else None,
+                },
+            )
+        if body.scan_type in _AGENT_UNSUPPORTED_SCAN_TYPES:
+            raise HTTPException(status_code=422, detail="scan_type_not_supported_on_agent")
 
     # Step 4b: source-acquisition prerequisite gate per Source-Ingestion
     # Fix (TOOL-ARCH §3.2 addendum 9d6ab25). ScanTypes that dispatch

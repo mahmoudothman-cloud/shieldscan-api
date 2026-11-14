@@ -54,6 +54,7 @@ LIMIT_KEYS: tuple[str, ...] = (
     "scans.mobile.per_period",
     "scans.full_spectrum.per_period",
     "recon.subdomains.max",
+    "agents.max",  # M14 — on-prem agents per org (missing in a version = 0)
 )
 FEATURE_KEYS: tuple[str, ...] = (
     "ai_fix",
@@ -98,6 +99,7 @@ def _limits(
     mobile: int,
     full_spectrum: int,
     recon: int,
+    agents: int = 0,
 ) -> dict[str, int]:
     return {
         "users.max": users,
@@ -108,6 +110,7 @@ def _limits(
         "scans.mobile.per_period": mobile,
         "scans.full_spectrum.per_period": full_spectrum,
         "recon.subdomains.max": recon,
+        "agents.max": agents,
     }
 
 
@@ -185,6 +188,7 @@ DEFAULT_LADDER: tuple[LadderEntry, ...] = (
             mobile=2,
             full_spectrum=0,
             recon=100,
+            agents=1,
         ),
         features=_features(
             ai_fix=True,
@@ -210,6 +214,7 @@ DEFAULT_LADDER: tuple[LadderEntry, ...] = (
             mobile=10,
             full_spectrum=50,
             recon=500,
+            agents=5,
         ),
         features=_features(
             ai_fix=True,
@@ -235,6 +240,7 @@ DEFAULT_LADDER: tuple[LadderEntry, ...] = (
             mobile=UNLIMITED,
             full_spectrum=UNLIMITED,
             recon=UNLIMITED,
+            agents=UNLIMITED,
         ),
         features=_features(
             ai_fix=True,
@@ -425,7 +431,7 @@ async def resolve_limits(
     else:
         p_start, p_end = _calendar_period(today)
 
-    limits: dict[str, int] = {k: int(version.limits.get(k, 0)) for k in LIMIT_KEYS}
+    limits: dict[str, int] = {k: int(version.limits.get(k, 0)) for k in LIMIT_KEYS}  # missing key → 0
     features: dict[str, Any] = {k: version.features.get(k, False) for k in FEATURE_KEYS}
     touched: list[str] = []
     now = datetime.now(timezone.utc)

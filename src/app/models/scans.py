@@ -120,4 +120,7 @@ class ScanJob(Base, TimestampMixin, TenantMixin):
     )
     finding_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # M14: which on-prem agent this job was routed to (NULL = cloud worker).
+    agent_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True, index=True)
+    leased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

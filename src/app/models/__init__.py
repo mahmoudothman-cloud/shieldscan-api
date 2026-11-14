@@ -8,6 +8,7 @@ model files under src/app/models/.
 from app.models import (  # noqa: F401
     ai,
     audit,
+    agents,
     base,
     billing,
     compliance,

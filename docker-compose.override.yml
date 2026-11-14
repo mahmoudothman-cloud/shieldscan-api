@@ -1,0 +1,9 @@
+# OVH VPS-2 single-box sizing (doc 09 §12.1). Untracked on purpose; limits only.
+services:
+  postgres:
+    mem_limit: 1800m
+    command: ["postgres", "-c", "shared_buffers=1GB", "-c", "work_mem=16MB", "-c", "max_connections=60", "-c", "effective_cache_size=3GB"]
+  redis:
+    mem_limit: 512m
+  qdrant:
+    mem_limit: 600m

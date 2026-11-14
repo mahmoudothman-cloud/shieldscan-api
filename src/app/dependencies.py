@@ -41,8 +41,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.db.tenant_context import set_tenant_context
+from app.models.agents import Agent
 from app.models.identity import APIKey, MembershipRole, User
 from app.redis_client import get_redis
+from app.services.agents import authenticate as authenticate_agent
 from app.services.auth import (
     TokenError,
     TokenExpiredError,
@@ -561,6 +563,23 @@ async def require_platform_admin(
     if not identity.user.is_platform_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
     return identity
+
+
+async def require_agent(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Agent:
+    """M14: authenticate an on-prem agent by its bearer key (``ss_agent_…``)
+    and set the tenant context to its org. 401 for anything else — an
+    API key or JWT is not an agent credential."""
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="agent_key_required")
+    agent = await authenticate_agent(db, header[7:].strip())
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="agent_key_invalid")
+    await set_tenant_context(db, agent.organization_id)
+    return agent
 
 
 # ---------------------------------------------------------------- tenant scoping (Task 3.1)

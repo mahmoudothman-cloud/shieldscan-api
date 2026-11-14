@@ -57,6 +57,7 @@ from app.models.mobile import MobileUpload
 from app.models.projects import Project, ProjectCredential
 from app.models.recon import AttackSurface
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
+from app.services.agents import agent_queue_key, remember_payload
 from app.services.audit import ScanAction, audit
 from app.services.credentials import decrypt_credential
 from app.services.r2 import generate_presigned_get_url
@@ -267,6 +268,7 @@ class ScanOrchestrator:
 
     def __init__(self, db: AsyncSession, redis) -> None:
         self.db = db
+        self.redis = redis
         self.queue = ScanQueue(redis)
 
     async def dispatch(
@@ -321,6 +323,7 @@ class ScanOrchestrator:
                     engine="recon",
                     target_url=target_url,
                     status="queued",
+                    agent_id=scan.project.agent_id,  # M14: None for cloud projects
                     # Y-RECON-SCANJOB-IDEMPOTENCY-KEY (a): one recon job
                     # per scan; no per-target hash needed at phase-1.
                     idempotency_key=f"{scan.id}:recon:{unix_ts}",
@@ -345,6 +348,7 @@ class ScanOrchestrator:
                     engine=tool,
                     target_url=target_url,
                     status="queued",
+                    agent_id=scan.project.agent_id,  # M14: None for cloud projects
                     idempotency_key=f"{scan.id}:{tool}:{unix_ts}",
                 )
                 for tool in tools
@@ -480,7 +484,15 @@ class ScanOrchestrator:
                 # the ScanJob above), not the system project's root.
                 target_url_override=job.target_url if scan.is_public else None,
             )
-            await self.queue.dispatch(priority.value, payload)
+            if job.agent_id is not None:
+                # M14: agent-bound project → the agent's own queue; the
+                # gateway hands it out on the agent's long-poll.
+                await self.redis.lpush(  # type: ignore[misc]
+                    agent_queue_key(job.agent_id), json.dumps(payload)
+                )
+                await remember_payload(self.redis, job.id, payload)
+            else:
+                await self.queue.dispatch(priority.value, payload)
 
         return jobs
 
@@ -660,6 +672,12 @@ class ScanOrchestrator:
         # (a.ii): {scan_id}:{tool}:{sha256(target_url)[:16]}:{ts} —
         # deterministic per (scan, tool, target), order-independent.
         unix_ts = int(time.time())
+        # M14: phase 2 stays on the agent that ran recon (None for cloud).
+        recon_agent_id = (
+            await self.db.execute(
+                select(ScanJob.agent_id).where(ScanJob.scan_id == scan_id, ScanJob.engine == "recon").limit(1)
+            )
+        ).scalar_one_or_none()
         created_jobs: list[ScanJob] = []
         for surface in surface_rows:
             target_hash = hashlib.sha256(
@@ -673,6 +691,7 @@ class ScanOrchestrator:
                         engine=tool,
                         target_url=surface.full_url,
                         status="queued",
+                        agent_id=recon_agent_id,
                         idempotency_key=f"{scan_id}:{tool}:{target_hash}:{unix_ts}",
                     )
                 )
@@ -700,7 +719,13 @@ class ScanOrchestrator:
                 None,
                 target_url_override=job.target_url,
             )
-            await self.queue.dispatch(priority.value, payload)
+            if job.agent_id is not None:
+                await self.redis.lpush(  # type: ignore[misc]
+                    agent_queue_key(job.agent_id), json.dumps(payload)
+                )
+                await remember_payload(self.redis, job.id, payload)
+            else:
+                await self.queue.dispatch(priority.value, payload)
 
         return created_jobs
 

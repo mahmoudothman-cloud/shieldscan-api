@@ -56,7 +56,7 @@ from app.schemas.credentials import (
     CredentialResponse,
 )
 from app.redis_client import get_redis
-from app.services.audit import ProjectAction, audit
+from app.services.audit import AgentAction, ProjectAction, audit
 from app.services.credentials import encrypt_credential
 from app.services.projects import find_in_flight_scans_by_project
 from app.services.scan_queue import apply_cancel_state, publish_cancel_signal
@@ -78,7 +78,9 @@ from app.services.domain_verify import (
     verify_meta_tag,
 )
 from app.services.projects import extract_root_domain
-from app.services.plan_enforcement import require_capacity
+from app.models.agents import Agent, AgentStatus
+from app.services.plan_enforcement import plan_limit_exception, require_capacity
+from app.services.plans import get_effective_limits
 from app.services.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -279,12 +281,43 @@ async def patch_project(
     request: Request,
     identity: AuthIdentity = Depends(require_org_membership()),
     db: AsyncSession = Depends(get_db),
+    redis: redis_asyncio.Redis = Depends(get_redis),
 ):
     project = await _load_project(db, org_id, project_id)
     if project is None:
         raise _NOT_FOUND
 
     update = body.model_dump(exclude_unset=True)
+
+    # M14: binding to an on-prem agent — admin only, the agent must be
+    # this org's and not revoked, and the plan must allow agents at all.
+    if "agent_id" in update:
+        if identity.role != MembershipRole.ADMIN:
+            raise HTTPException(status_code=403, detail="insufficient_role")
+        new_agent_id = update["agent_id"]
+        if new_agent_id is not None:
+            agent = (
+                await db.execute(
+                    select(Agent).where(Agent.id == new_agent_id, Agent.organization_id == org_id)
+                )
+            ).scalar_one_or_none()
+            if agent is None or agent.status == AgentStatus.REVOKED:
+                raise HTTPException(status_code=404, detail="agent_not_found")
+            eff = await get_effective_limits(db, redis, org_id)
+            if eff.limit("agents.max") == 0:
+                raise plan_limit_exception(eff, "agents.max", limit=0, current=0)
+        if new_agent_id != project.agent_id:
+            await audit(
+                db,
+                organization_id=org_id,
+                actor_id=identity.user.id if identity.user is not None else None,
+                action=AgentAction.PROJECT_AGENT_BOUND,
+                resource_type="project",
+                resource_id=project.id,
+                ip_address=get_real_ip(request),
+                user_agent=request.headers.get("User-Agent"),
+                details={"agent_id": str(new_agent_id) if new_agent_id else ""},
+            )
 
     # target_url change that alters root_domain auto-resets
     # verification state (DRIFT-LOG 2026-04-23). Same domain → no
@@ -355,9 +388,7 @@ async def delete_project(
 # ---------------------------------------------------------------- helpers
 
 
-async def _load_project(
-    db: AsyncSession, org_id: UUID, project_id: UUID
-) -> Project | None:
+async def _load_project(db: AsyncSession, org_id: UUID, project_id: UUID) -> Project | None:
     """Single-row fetch with explicit org_id filter. Defense-in-depth
     on top of RLS — keeps the WHERE clause visible at every callsite."""
     stmt = select(Project).where(
@@ -561,9 +592,7 @@ async def patch_project_credentials(
     cred = (
         await select_fresh(
             db,
-            select(ProjectCredential).where(
-                ProjectCredential.project_id == project_id
-            ),
+            select(ProjectCredential).where(ProjectCredential.project_id == project_id),
         )
     ).scalar_one()
 
@@ -632,9 +661,7 @@ async def delete_project_credentials(
 
     cred = (
         await db.execute(
-            select(ProjectCredential).where(
-                ProjectCredential.project_id == project_id
-            )
+            select(ProjectCredential).where(ProjectCredential.project_id == project_id)
         )
     ).scalar_one_or_none()
     if cred is None:
@@ -701,8 +728,6 @@ async def delete_project_credentials(
     # Step 5: publish cancel signals post-commit (Task 4.5 ordering;
     # fire-and-forget — durable PG state is the source of truth).
     for scan_id in cascade_signals:
-        await publish_cancel_signal(
-            redis, scan_id, reason="credential_revoked", logger=logger
-        )
+        await publish_cancel_signal(redis, scan_id, reason="credential_revoked", logger=logger)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -77,6 +77,15 @@ CREDENTIAL_INDEXED_TABLES: Final[dict[str, str]] = {
         "precondition. Tenant scoping enforced at the application layer "
         "(see routes/api_keys.py list + delete handlers). See ADR-012."
     ),
+    "agents": (
+        "M14 (ADR-012 amendment, 2026-11-14). An on-prem agent authenticates "
+        "with ``Authorization: Bearer ss_agent_...`` and the row is found by "
+        "SHA-256(plaintext) before any tenant is known — the same shape as "
+        "api_keys. Tenant scoping is enforced at the application layer: "
+        "every org-facing route filters on organization_id, and the agent "
+        "gateway sets the tenant context from the row it found before "
+        "touching any tenant table. See On-Prem Agent Design v1.0 §4."
+    ),
 }
 
 

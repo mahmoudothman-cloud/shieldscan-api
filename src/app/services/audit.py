@@ -163,6 +163,15 @@ class OrgAction(str, PyEnum):
     MEMBER_REMOVED = "organization.member_removed"  # DELETE /members/{uid}
 
 
+class AgentAction(str, PyEnum):
+    """On-prem agent lifecycle (M14)."""
+
+    AGENT_CREATED = "agent.created"  # POST /orgs/{id}/agents; details.name
+    AGENT_ENROLLED = "agent.enrolled"  # POST /agent/enroll; details.hostname/version
+    AGENT_REVOKED = "agent.revoked"  # DELETE /orgs/{id}/agents/{aid}
+    PROJECT_AGENT_BOUND = "project.agent_bound"  # PATCH project agent_id; details.agent_id ("" = unbound)
+
+
 class AdminAction(str, PyEnum):
     """Platform-admin events on ONE org (M12 slice 3). Written into that
     org's audit log with the tenant context set to it, so the org's own
@@ -184,6 +193,7 @@ ALL_ACTION_ENUMS: tuple[type[PyEnum], ...] = (
     VulnerabilityAction,
     OrgAction,
     AdminAction,
+    AgentAction,
 )
 
 
@@ -210,6 +220,10 @@ class AuditDetails(TypedDict, total=False):
     size_bytes: int  # bytes of the uploaded artifact (mobile uploads)
     scan_type: str  # e.g. "full_web", "mobile" — scan-domain events
     key: str  # limit/feature key — admin override events
+    name: str  # agent name — agent events
+    agent_id: str  # agent events / project binding
+    hostname: str  # agent enrolment
+    version: str  # agent enrolment
     value: object  # the override value — admin override events
     plan_code: str  # admin subscription events
     billing_interval: str  # admin subscription events
@@ -228,7 +242,13 @@ async def audit(
     *,
     organization_id: UUID,
     actor_id: UUID | None,
-    action: AuthAction | ProjectAction | ScanAction | VulnerabilityAction | OrgAction | AdminAction,
+    action: AuthAction
+    | ProjectAction
+    | ScanAction
+    | VulnerabilityAction
+    | OrgAction
+    | AdminAction
+    | AgentAction,
     resource_type: str,
     resource_id: UUID | None = None,
     ip_address: str | None = None,

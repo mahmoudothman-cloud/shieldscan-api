@@ -35,6 +35,8 @@ from app.routes import auth as auth_routes
 from app.routes import compliance as compliance_routes
 from app.routes import mobile as mobile_routes
 from app.routes import admin as admin_routes
+from app.routes import agent_gateway as agent_gateway_routes
+from app.routes import agents as agents_routes
 from app.routes import billing as billing_routes
 from app.routes import plans as plans_routes
 from app.routes import orgs as orgs_routes
@@ -176,3 +178,5 @@ app.include_router(tools_routes.router, prefix="/v1")
 app.include_router(plans_routes.router, prefix="/v1")
 app.include_router(admin_routes.router, prefix="/v1")
 app.include_router(billing_routes.router, prefix="/v1")
+app.include_router(agents_routes.router, prefix="/v1")
+app.include_router(agent_gateway_routes.router, prefix="/v1")

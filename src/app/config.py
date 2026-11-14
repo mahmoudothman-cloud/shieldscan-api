@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     PAYMOB_CARD_INTEGRATION_ID: int = 0  # 3DS card integration (first payment, tokenises the card)
     PAYMOB_MOTO_INTEGRATION_ID: int = 0  # MOTO integration (renewals on the saved token)
     PAYMOB_WEBHOOK_URL: str = ""  # public URL of POST /v1/billing/webhooks/paymob
+    # M14 — an agent whose last heartbeat is older than this is offline:
+    # scans on its projects fail at once with agent_offline.
+    AGENT_OFFLINE_AFTER_S: int = 90
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

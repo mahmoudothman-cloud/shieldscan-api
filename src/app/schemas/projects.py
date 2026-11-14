@@ -6,6 +6,7 @@ response models. Validators use ``@field_validator``.
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime
 from typing import Annotated
 from urllib.parse import urlparse
@@ -14,8 +15,35 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+def _is_private_host(host: str) -> bool:
+    """True for hosts only reachable from inside a network — the targets an
+    on-prem agent exists for (On-Prem Agent Design v1.0 §5): loopback,
+    RFC 1918 / link-local / ULA addresses, and single-label or ``.corp``,
+    ``.internal``, ``.lan``, ``.local``, ``.home``, ``.intranet`` names."""
+    h = host.lower().rstrip(".")
+    if h in ("localhost",):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_private or ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        pass
+    if "." not in h:
+        return True  # single-label intranet name
+    return h.rsplit(".", 1)[-1] in {
+        "corp",
+        "internal",
+        "lan",
+        "local",
+        "home",
+        "intranet",
+        "localhost",
+    }
+
+
 def _validate_https_url(v: str) -> str:
-    """Reject non-HTTPS URLs (HTTP would be tested in plaintext).
+    """Reject non-HTTPS URLs (HTTP would be tested in plaintext) — except
+    for private / intranet hosts, which an on-prem agent reaches over the
+    customer's own network and which are commonly plain HTTP (M14).
 
     Empty / non-URL strings caught here too — caller's caller (the
     schema validator) renders these as 422.
@@ -23,10 +51,12 @@ def _validate_https_url(v: str) -> str:
     if not v:
         raise ValueError("target_url is required")
     parsed = urlparse(v)
-    if parsed.scheme != "https":
-        raise ValueError("target_url must use https://")
     if not parsed.hostname:
         raise ValueError("target_url must include a hostname")
+    if parsed.scheme == "http" and _is_private_host(parsed.hostname):
+        return v
+    if parsed.scheme != "https":
+        raise ValueError("target_url must use https:// (http:// only for private/intranet hosts)")
     return v
 
 
@@ -87,6 +117,8 @@ class ProjectUpdateRequest(BaseModel):
     target_url: str | None = Field(default=None, min_length=1, max_length=500)
     source_repo_url: str | None = Field(default=None, max_length=500)
     container_image: str | None = Field(default=None, max_length=255)
+    # M14: bind to / unbind from an on-prem agent (null unbinds). Admin only.
+    agent_id: UUID | None = None
 
     @field_validator("target_url")
     @classmethod
@@ -127,6 +159,7 @@ class ProjectResponse(BaseModel):
     source_repo_url: str | None
     container_image: str | None
     domain_verified: bool
+    agent_id: UUID | None = None
     verification_token: str  # included on read — see Task 3.1 §H decision #2
     archived_at: datetime | None
     created_at: datetime
