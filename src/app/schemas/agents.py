@@ -48,6 +48,9 @@ class AgentCreatedResponse(BaseModel):
 
 class AgentListResponse(BaseModel):
     agents: list[AgentResponse]
+    # Latest public release (e.g. "v0.2.0"), None when unknown; the
+    # dashboard shows "update available" on agents behind it.
+    latest_version: str | None = None
 
 
 # ---------------------------------------------------------------- gateway (agent-facing)

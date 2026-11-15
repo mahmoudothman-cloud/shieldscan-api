@@ -24,6 +24,27 @@ import { PlanLimitAlert } from "@/components/PlanLimitAlert";
 import { Alert, Button, Card, Field, Input } from "@/components/ui";
 
 export const AGENT_INSTALL_URL = "https://github.com/mahmoudothman-cloud/shieldscan-agent";
+export const AGENT_RELEASES_URL = `${AGENT_INSTALL_URL}/releases`;
+
+/** "v0.1.0" / "0.1.0-dev+abc" → [0,1,0]; null when not a version. */
+function semver(v: string | null | undefined): [number, number, number] | null {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(v ?? "");
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** True when the agent runs a lower version than the latest release. */
+export function isBehind(
+  running: string | null | undefined,
+  latest: string | null | undefined,
+): boolean {
+  const a = semver(running);
+  const b = semver(latest);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i];
+  }
+  return false;
+}
 
 /** Display label + tone for the API's status (offline is derived server-side). */
 export function agentStatusView(status: string): { label: string; tone: string; live: boolean } {
@@ -74,6 +95,7 @@ export function Agents({ isAdmin }: { isAdmin: boolean }) {
     setDescription("");
   }
 
+  const latest = list.data?.latest_version ?? null;
   const agents = (list.data?.agents ?? []).filter((a) => a.status !== "revoked");
   const revoked = (list.data?.agents ?? []).filter((a) => a.status === "revoked");
 
@@ -155,6 +177,7 @@ export function Agents({ isAdmin }: { isAdmin: boolean }) {
               <AgentRow
                 key={a.id}
                 agent={a}
+                latest={latest}
                 isAdmin={isAdmin}
                 confirming={confirmRevoke === a.id}
                 onConfirm={() => setConfirmRevoke(a.id)}
@@ -246,6 +269,7 @@ function EnrolmentPanel({
 
 function AgentRow({
   agent: a,
+  latest,
   isAdmin,
   confirming,
   onConfirm,
@@ -254,6 +278,7 @@ function AgentRow({
   revoking,
 }: {
   agent: AgentItem;
+  latest: string | null;
   isAdmin: boolean;
   confirming: boolean;
   onConfirm: () => void;
@@ -270,6 +295,17 @@ function AgentRow({
           <span className="font-medium text-ink">{a.name}</span>
           <AgentStatusBadge status={a.status} />
           {a.version && <span className="font-mono text-xs text-ink-3">{a.version}</span>}
+          {isBehind(a.version, latest) && (
+            <a
+              href={AGENT_RELEASES_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-full bg-high-wash px-2 py-0.5 text-xs font-medium text-high"
+              title={`Latest release is ${latest ?? ""}`}
+            >
+              update available · {latest}
+            </a>
+          )}
         </p>
         {a.description && <p className="text-xs text-ink-3">{a.description}</p>}
         <p className="mt-0.5 text-xs text-ink-3">

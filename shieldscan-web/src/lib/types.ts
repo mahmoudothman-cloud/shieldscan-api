@@ -444,6 +444,8 @@ export interface AgentItem {
 
 export interface AgentListResponse {
   agents: AgentItem[];
+  /** Latest public release tag, e.g. "v0.2.0"; null when unknown. */
+  latest_version?: string | null;
 }
 
 export interface AgentCreateInput {

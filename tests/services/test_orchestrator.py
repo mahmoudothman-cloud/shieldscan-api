@@ -16,6 +16,7 @@ Eight tests pinning the dispatch contract:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -1039,3 +1040,88 @@ async def test_dispatch_phase2_no_dispatch_audit_fails_loud(
     ).scalars().all()
     assert len(fail_audits) == 1
     assert fail_audits[0].details["reason"] == "no_dispatch_audit_found"
+
+
+# ---------------------------------------------------------------- M14 follow-up: skip what cannot run
+
+
+@pytest.mark.asyncio
+async def test_dispatch_phase2_skips_tls_only_engines_on_plain_http_surfaces(
+    web_scan, db_session, fake_redis
+):
+    """A recon-discovered http:// surface gets no sslyze job; an https://
+    one does. The audit names the skip and why."""
+    s = web_scan
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+    assert await fake_redis.brpop("shieldscan:queue:normal", timeout=1) is not None
+
+    await _seed_attack_surface(db_session, s["scan"], s["org"], url="http://legacy.example.com")
+    await _seed_attack_surface(db_session, s["scan"], s["org"], url="https://api.example.com")
+    phase2 = await orch.dispatch_phase2(scan_id=s["scan"].id)
+
+    by_target = {}
+    for job in phase2:
+        by_target.setdefault(job.target_url, set()).add(job.engine)
+    assert "sslyze" not in by_target["http://legacy.example.com"]
+    assert "sslyze" in by_target["https://api.example.com"]
+    assert "nuclei" in by_target["http://legacy.example.com"]
+
+    audit_row = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_DISPATCHED_PHASE2.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalar_one()
+    assert audit_row.details["skipped_tools"] == {"sslyze": "plain_http_target"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_phase2_on_agent_skips_engines_the_agent_lacks(
+    web_scan, db_session, fake_redis
+):
+    """On an agent-bound scan, engines the agent's last heartbeat did not
+    report as ok get no job (they would only fail "no runner registered");
+    the rest are queued to the agent."""
+    from app.models.agents import Agent, AgentStatus
+    from app.services.agents import agent_queue_key
+
+    s = web_scan
+    agent = Agent(
+        organization_id=s["org"].id,
+        name="dc1",
+        status=AgentStatus.ACTIVE,
+        key_hash="x" * 64,
+        key_prefix="ss_agent_x",
+        last_seen_at=datetime.now(timezone.utc),
+        tools={"nuclei": {"status": "ok"}, "nikto": {"status": "ok"}, "zap": {"status": "missing"}},
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    s["project"].agent_id = agent.id
+    await db_session.commit()
+
+    orch = ScanOrchestrator(db_session, fake_redis)
+    await orch.dispatch(s["scan"], s["identity"])
+    assert await fake_redis.brpop(agent_queue_key(agent.id), timeout=1) is not None  # recon
+
+    await _seed_attack_surface(db_session, s["scan"], s["org"], url="https://api.example.com")
+    phase2 = await orch.dispatch_phase2(scan_id=s["scan"].id)
+    engines = {j.engine for j in phase2}
+    assert engines == {"nuclei", "nikto"}, engines
+    assert all(j.agent_id == agent.id for j in phase2)
+    assert await fake_redis.llen(agent_queue_key(agent.id)) == 2
+
+    audit_row = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_DISPATCHED_PHASE2.value,
+                AuditLog.resource_id == s["scan"].id,
+            )
+        )
+    ).scalar_one()
+    skipped = audit_row.details["skipped_tools"]
+    assert skipped["zap"] == "not_installed_on_agent"
+    assert set(skipped) == set(SCAN_TYPE_TOOLS[ScanType.FULL_WEB]) - {"recon", "nuclei", "nikto"}

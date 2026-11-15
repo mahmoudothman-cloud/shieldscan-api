@@ -5,7 +5,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Agents } from "./Agents";
+import { Agents, isBehind } from "./Agents";
 import { ApiError } from "@/lib/api";
 
 vi.mock("@/lib/auth", () => ({ useOrgId: () => "org-1" }));
@@ -46,7 +46,7 @@ function setup({ isAdmin = true, capped = false } = {}) {
   apiMock.mockImplementation((path, opts) => {
     const m = opts?.method ?? "GET";
     if (path === "/v1/orgs/org-1/agents" && m === "GET")
-      return Promise.resolve({ agents: [dc1, stale] });
+      return Promise.resolve({ agents: [dc1, stale], latest_version: "v0.1.0" });
     if (path === "/v1/orgs/org-1/agents" && m === "POST") {
       if (capped)
         return Promise.reject(
@@ -95,6 +95,8 @@ describe("<Agents />", () => {
     expect(screen.getByText("v0.1.0")).toBeInTheDocument();
     expect(screen.getAllByText(/scanner-01 \(linux\/amd64\)/)).toHaveLength(2);
     expect(screen.getByText(/Missing on the agent: nikto/)).toBeInTheDocument();
+    // lab runs v0.0.9 behind the v0.1.0 release; dc1 is current.
+    expect(screen.getAllByText(/update available · v0\.1\.0/)).toHaveLength(1);
   });
 
   it("admin creates an agent and sees the one-time enrol command", async () => {
@@ -138,5 +140,15 @@ describe("<Agents />", () => {
     await screen.findByText("dc1");
     expect(screen.queryByLabelText("New agent name")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
+  });
+});
+
+describe("isBehind", () => {
+  it("compares semver, tolerating dev builds and unknowns", () => {
+    expect(isBehind("v0.1.0", "v0.2.0")).toBe(true);
+    expect(isBehind("v0.2.0", "v0.2.0")).toBe(false);
+    expect(isBehind("0.0.9-dev+abc", "v0.1.0")).toBe(true);
+    expect(isBehind("dev", "v0.1.0")).toBe(false);
+    expect(isBehind("v0.1.0", null)).toBe(false);
   });
 });

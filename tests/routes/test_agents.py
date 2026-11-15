@@ -15,10 +15,22 @@ from app.models.billing import OrgLimitOverride
 from app.models.identity import Membership, MembershipRole, Organization, User
 from app.models.projects import Project
 from app.models.scans import ScanJob
+from app.services import agent_releases
 from app.services.agents import agent_queue_key
 from app.services.auth import create_access_token, hash_password
 from app.services.plans import invalidate_limits
 from tests.conftest import use_org
+
+
+
+@pytest.fixture(autouse=True)
+def _no_github(monkeypatch):
+    """The agents list asks GitHub for the latest release (cached); tests never should."""
+
+    async def fake_fetch(_repo: str) -> str | None:
+        return "v9.9.9"
+
+    monkeypatch.setattr(agent_releases, "_fetch_latest_tag", fake_fetch)
 
 
 @pytest_asyncio.fixture
@@ -108,6 +120,7 @@ async def test_create_enrol_heartbeat_list_revoke(client, ctx):
     # The token is one-time.
     r = await client.get(f"/v1/orgs/{c['org'].id}/agents", headers=c["member"])
     assert r.status_code == 200
+    assert r.json()["latest_version"] == "v9.9.9"
     me = r.json()["agents"][0]
     assert (
         me["status"] == "active"

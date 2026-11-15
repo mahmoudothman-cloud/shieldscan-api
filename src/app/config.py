@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     # M14 — an agent whose last heartbeat is older than this is offline:
     # scans on its projects fail at once with agent_offline.
     AGENT_OFFLINE_AFTER_S: int = 90
+    # Public repo whose latest release is the current agent version (for the
+    # "update available" badge). Empty disables the lookup.
+    AGENT_RELEASES_REPO: str = "mahmoudothman-cloud/shieldscan-agent"
+    AGENT_RELEASES_CACHE_S: int = 86400
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

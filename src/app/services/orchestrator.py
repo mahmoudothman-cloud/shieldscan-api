@@ -57,6 +57,7 @@ from app.models.mobile import MobileUpload
 from app.models.projects import Project, ProjectCredential
 from app.models.recon import AttackSurface
 from app.models.scans import Scan, ScanJob, ScanStatus, ScanType
+from app.models.agents import Agent
 from app.services.agents import agent_queue_key, remember_payload
 from app.services.audit import ScanAction, audit
 from app.services.credentials import decrypt_credential
@@ -96,6 +97,10 @@ class UnsupportedScanTypeError(ValueError):
 # Order in the tuple is informational only — workers receive each as
 # a separate job payload and there's no inter-tool sequencing here.
 #
+# Engines that only make sense against TLS: skipped for http:// surfaces
+# (M14 follow-up; see dispatch_phase2).
+TLS_ONLY_ENGINES: Final[frozenset[str]] = frozenset({"sslyze"})
+
 # M8.1β.2 ADR-028 (SPEC §13): subfinder + httpx are NO LONGER in any
 # entry. Recon is dispatched as a phase-1 engine="recon" ScanJob
 # (orchestrator-implicit for web-ScanTypes; see _WEB_SCAN_TYPES +
@@ -678,12 +683,35 @@ class ScanOrchestrator:
                 select(ScanJob.agent_id).where(ScanJob.scan_id == scan_id, ScanJob.engine == "recon").limit(1)
             )
         ).scalar_one_or_none()
+        # M14 follow-up: do not create jobs that cannot succeed.
+        #  * On an agent, an engine the last heartbeat did not report as
+        #    installed (``agents.tools``) would only fail "no runner
+        #    registered"; the dashboard already shows what is missing.
+        #  * A TLS-only engine on a plain-http surface has nothing to
+        #    probe. Recon-discovered surfaces can be http:// on the cloud
+        #    path too, so this rule is not agent-specific.
+        skipped: dict[str, str] = {}
+        agent_tools_ok: set[str] | None = None
+        if recon_agent_id is not None:
+            agent = await self.db.get(Agent, recon_agent_id)
+            inventory = (agent.tools or {}) if agent is not None else {}
+            if inventory:
+                agent_tools_ok = {
+                    k for k, v in inventory.items() if (v or {}).get("status") == "ok"
+                }
         created_jobs: list[ScanJob] = []
         for surface in surface_rows:
             target_hash = hashlib.sha256(
                 surface.full_url.encode()
             ).hexdigest()[:16]
+            plain_http = surface.full_url.lower().startswith("http://")
             for tool in non_recon_tools:
+                if agent_tools_ok is not None and tool not in agent_tools_ok:
+                    skipped[tool] = "not_installed_on_agent"
+                    continue
+                if plain_http and tool in TLS_ONLY_ENGINES:
+                    skipped.setdefault(tool, "plain_http_target")
+                    continue
                 created_jobs.append(
                     ScanJob(
                         organization_id=scan.organization_id,
@@ -705,6 +733,7 @@ class ScanOrchestrator:
             target_count=len(surface_rows),
             tool_count=len(non_recon_tools),
             job_count=len(created_jobs),
+            skipped_tools=skipped,
             recon_event_id=dispatch_row.id,
         )
 
@@ -738,10 +767,12 @@ class ScanOrchestrator:
         tool_count: int,
         job_count: int,
         recon_event_id: UUID,
+        skipped_tools: dict[str, str] | None = None,
     ) -> None:
         """Emit SCAN_DISPATCHED_PHASE2 (Q5 b two-phase + b.i always-emit
         + rich details). Does not commit (caller owns the transaction
-        boundary)."""
+        boundary). ``skipped_tools`` (M14) names engines that got no job
+        and why (not_installed_on_agent / plain_http_target)."""
         await audit(
             self.db,
             organization_id=scan.organization_id,
@@ -757,6 +788,7 @@ class ScanOrchestrator:
                 "tool_count": tool_count,
                 "job_count": job_count,
                 "recon_event_id": str(recon_event_id),
+                "skipped_tools": skipped_tools or {},
             },  # type: ignore[arg-type]
         )
 

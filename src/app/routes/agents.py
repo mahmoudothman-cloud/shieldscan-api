@@ -25,6 +25,7 @@ from app.schemas.agents import (
     AgentResponse,
 )
 from app.services import agents as svc
+from app.services.agent_releases import latest_agent_version
 from app.services.audit import AgentAction, audit
 from app.services.plan_enforcement import require_capacity
 from app.services.plans import invalidate_limits
@@ -81,6 +82,7 @@ async def list_agents(
     org_id: UUID,
     identity: AuthIdentity = Depends(require_org_membership()),
     db: AsyncSession = Depends(get_db),
+    redis: redis_asyncio.Redis = Depends(get_redis),
 ) -> AgentListResponse:
     agents = list(
         (
@@ -92,7 +94,10 @@ async def list_agents(
         ).scalars()
     )
     counts = await _project_counts(db, org_id)
-    return AgentListResponse(agents=[_view(a, counts.get(a.id, 0)) for a in agents])
+    return AgentListResponse(
+        agents=[_view(a, counts.get(a.id, 0)) for a in agents],
+        latest_version=await latest_agent_version(redis),
+    )
 
 
 @router.post("", response_model=AgentCreatedResponse, status_code=status.HTTP_201_CREATED)
