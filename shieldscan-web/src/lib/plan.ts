@@ -34,6 +34,7 @@ export const LIMIT_LABELS: Record<string, string> = {
   "scans.mobile.per_period": "mobile scans",
   "scans.full_spectrum.per_period": "full-spectrum scans",
   "recon.subdomains.max": "recon subdomains",
+  "agents.max": "on-prem agents",
 };
 
 export const FEATURE_LABELS: Record<string, string> = {

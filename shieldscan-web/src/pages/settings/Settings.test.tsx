@@ -76,6 +76,7 @@ function setup(role = "admin") {
       });
     if (path === "/v1/orgs/org-1/members/u-admin" && m === "PATCH")
       return Promise.reject(new ApiError(409, "last_admin"));
+    if (path === "/v1/orgs/org-1/agents" && m === "GET") return Promise.resolve({ agents: [] });
     if (path === "/v1/auth/api-keys" && m === "GET")
       return Promise.resolve([
         {

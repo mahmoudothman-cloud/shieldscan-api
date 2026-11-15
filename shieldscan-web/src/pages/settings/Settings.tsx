@@ -2,7 +2,8 @@
  * /settings — organization profile, members, API keys. Admin-only
  * controls are rendered disabled (not hidden) for members and viewers,
  * with the reason, so the shape of the page is the same for everyone.
- * Billing (M12) and notifications will add tabs here.
+ * Billing (M12) and on-prem agents (M14) have their own cards; notifications
+ * will add one.
  */
 
 import { useState } from "react";
@@ -27,6 +28,7 @@ import { relTime } from "@/lib/format";
 import { PlanLimitAlert } from "@/components/PlanLimitAlert";
 import { Alert, Button, Card, Field, Input, Select, Spinner } from "@/components/ui";
 import { planLimitOf } from "@/lib/plan";
+import { Agents } from "@/pages/settings/Agents";
 import { BillingCard } from "@/pages/settings/BillingCard";
 import { PlanUsage } from "@/pages/settings/PlanUsage";
 
@@ -77,6 +79,9 @@ export default function Settings() {
         )}
         <OrgProfile org={org.data} isAdmin={isAdmin} />
         <ApiKeys isAdmin={isAdmin} />
+        <div className="lg:col-span-2">
+          <Agents isAdmin={isAdmin} />
+        </div>
         <div className="lg:col-span-2">
           <Members orgId={orgId} isAdmin={isAdmin} />
         </div>

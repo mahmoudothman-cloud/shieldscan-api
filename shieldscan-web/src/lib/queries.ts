@@ -46,6 +46,10 @@ import type {
   FrameworkCatalog,
   OrgPostureResponse,
   ToolHealthResponse,
+  AgentCreatedResponse,
+  AgentCreateInput,
+  AgentListResponse,
+  ProjectUpdateInput,
 } from "./types";
 
 export const keys = {
@@ -188,6 +192,19 @@ export function useArchiveProject(orgId: string) {
   return useMutation({
     mutationFn: (projectId: string) =>
       api<null>(`/v1/orgs/${orgId}/projects/${projectId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
+  });
+}
+
+/** PATCH a project — today only `agent_id` (bind/unbind an on-prem agent, M14). */
+export function useUpdateProject(orgId: string, projectId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: ProjectUpdateInput) =>
+      api<ProjectResponse>(`/v1/orgs/${orgId}/projects/${projectId}`, {
+        method: "PATCH",
+        body: input,
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
   });
 }
@@ -397,6 +414,38 @@ export function useRevokeApiKey() {
   return useMutation({
     mutationFn: (keyId: string) => api<null>(`/v1/auth/api-keys/${keyId}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: API_KEYS_KEY }),
+  });
+}
+
+// ---------------------------------------------------------------- on-prem agents (M14)
+
+const agentsKey = (orgId: string) => [...keys.org(orgId), "agents"] as const;
+
+export function useAgents(orgId: string) {
+  return useQuery({
+    queryKey: agentsKey(orgId),
+    queryFn: () => api<AgentListResponse>(`/v1/orgs/${orgId}/agents`),
+    // "offline" is derived from the last heartbeat; keep the list honest.
+    refetchInterval: 30_000,
+  });
+}
+
+export function useCreateAgent(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: AgentCreateInput) =>
+      api<AgentCreatedResponse>(`/v1/orgs/${orgId}/agents`, { method: "POST", body: input }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: agentsKey(orgId) }),
+  });
+}
+
+export function useRevokeAgent(orgId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (agentId: string) =>
+      api<null>(`/v1/orgs/${orgId}/agents/${agentId}`, { method: "DELETE" }),
+    // Revoking unbinds projects too.
+    onSuccess: () => qc.invalidateQueries({ queryKey: keys.org(orgId) }),
   });
 }
 

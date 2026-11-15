@@ -6,15 +6,19 @@
 
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { Check, Copy, ShieldCheck } from "lucide-react";
+import { Check, Copy, Server, ShieldCheck } from "lucide-react";
 import { useOrgId } from "@/lib/auth";
 import {
+  useAgents,
   useArchiveProject,
   useCreateScan,
+  useOrg,
   useProject,
   useProjectScans,
+  useUpdateProject,
   useVerifyDomain,
 } from "@/lib/queries";
+import { AgentStatusBadge } from "@/pages/settings/Agents";
 import { PlanLimitAlert } from "@/components/PlanLimitAlert";
 import { ApiError } from "@/lib/api";
 import { planLimitOf } from "@/lib/plan";
@@ -49,6 +53,10 @@ export default function ProjectDetail() {
               <span className="inline-flex items-center gap-1 text-ok">
                 <ShieldCheck className="size-4" aria-hidden /> verified
               </span>
+            ) : p.agent_id ? (
+              <span className="inline-flex items-center gap-1 text-ok">
+                <Server className="size-4" aria-hidden /> verified by agent enrolment
+              </span>
             ) : (
               <span className="text-high">not verified</span>
             )}
@@ -59,10 +67,13 @@ export default function ProjectDetail() {
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="flex flex-col gap-6 lg:col-span-2">
-          {!p.domain_verified && <VerifyPanel orgId={orgId} project={p} />}
+          {!p.domain_verified && !p.agent_id && <VerifyPanel orgId={orgId} project={p} />}
           <ScanHistory orgId={orgId} projectId={p.id} />
         </div>
-        <RunScanPanel orgId={orgId} project={p} />
+        <div className="flex flex-col gap-6">
+          <RunScanPanel orgId={orgId} project={p} />
+          <AgentPanel orgId={orgId} project={p} />
+        </div>
       </div>
     </div>
   );
@@ -180,6 +191,8 @@ interface ScanTypeOption {
   needsVerified: boolean;
   needsRepo?: boolean;
   needsImage?: boolean;
+  /** Not runnable on an on-prem agent (source, container, mobile stay in the cloud). */
+  notOnAgent?: boolean;
   blurb: string;
 }
 
@@ -203,6 +216,7 @@ const SCAN_TYPES: ScanTypeOption[] = [
     label: "Full web + source",
     needsVerified: true,
     needsRepo: true,
+    notOnAgent: true,
     blurb: "Full web plus Semgrep, Gitleaks, Trivy-fs, Checkov on your repository.",
   },
   {
@@ -216,6 +230,7 @@ const SCAN_TYPES: ScanTypeOption[] = [
     label: "Container image",
     needsVerified: false,
     needsImage: true,
+    notOnAgent: true,
     blurb: "Trivy scan of the configured image.",
   },
 ];
@@ -223,18 +238,21 @@ const SCAN_TYPES: ScanTypeOption[] = [
 function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectResponse }) {
   const navigate = useNavigate();
   const create = useCreateScan(orgId, project.id);
+  const onAgent = project.agent_id !== null;
   const [type, setType] = useState<ScanCreateInput["scan_type"]>(
-    project.domain_verified ? "full_web" : "quick",
+    project.domain_verified || onAgent ? "full_web" : "quick",
   );
   const chosen = SCAN_TYPES.find((t) => t.value === type) ?? QUICK;
   const blocked =
-    chosen.needsVerified && !project.domain_verified
-      ? "Verify the domain first."
-      : chosen.needsRepo && !project.source_repo_url
-        ? "Add a repository URL to the project first."
-        : chosen.needsImage && !project.container_image
-          ? "Add a container image to the project first."
-          : null;
+    onAgent && chosen.notOnAgent
+      ? "This scan type runs in the cloud only; unbind the agent to use it."
+      : chosen.needsVerified && !project.domain_verified && !onAgent
+        ? "Verify the domain first."
+        : chosen.needsRepo && !project.source_repo_url
+          ? "Add a repository URL to the project first."
+          : chosen.needsImage && !project.container_image
+            ? "Add a container image to the project first."
+            : null;
 
   async function run() {
     const scan = await create.mutateAsync({ scan_type: type });
@@ -246,9 +264,13 @@ function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectRespo
     limit === null && create.error instanceof ApiError
       ? create.error.detail === "domain_not_verified"
         ? "Verify the domain before running this scan type."
-        : create.error.status === 429
-          ? "Too many scans started at once. Try again in a minute."
-          : String(create.error.detail ?? "Couldn't start the scan.")
+        : isDetailError(create.error.detail, "agent_offline")
+          ? "The agent bound to this project is offline — start it (or check `shieldscan-agent doctor` on that machine) and try again."
+          : isDetailError(create.error.detail, "scan_type_not_supported_on_agent")
+            ? "This scan type cannot run on an on-prem agent."
+            : create.error.status === 429
+              ? "Too many scans started at once. Try again in a minute."
+              : String(create.error.detail ?? "Couldn't start the scan.")
       : null;
 
   return (
@@ -270,6 +292,11 @@ function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectRespo
           )}
         </Field>
         <p className="text-sm text-ink-3">{chosen.blurb}</p>
+        {onAgent && !blocked && (
+          <p className="text-xs text-ink-3">
+            Runs on your on-prem agent; engines it does not have installed will fail visibly.
+          </p>
+        )}
         {blocked && <Alert tone="info">{blocked}</Alert>}
         {limit && <PlanLimitAlert limit={limit} />}
         {err && <Alert tone="error">{err}</Alert>}
@@ -279,6 +306,98 @@ function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectRespo
       </div>
     </Card>
   );
+}
+
+function isDetailError(detail: unknown, code: string): boolean {
+  return (
+    typeof detail === "object" && detail !== null && (detail as { error?: string }).error === code
+  );
+}
+
+// ---------------------------------------------------------------- on-prem agent (M14)
+
+/**
+ * Bind the project to one of the org's agents. A bound project's scans
+ * run only on that agent and need no domain verification — the admin's
+ * enrolment is the authorisation. Admin-only; members see the state.
+ */
+function AgentPanel({ orgId, project }: { orgId: string; project: ProjectResponse }) {
+  const org = useOrg(orgId);
+  const isAdmin = org.data?.my_role === "admin";
+  const agents = useAgents(orgId);
+  const update = useUpdateProject(orgId, project.id);
+  const usable = (agents.data?.agents ?? []).filter((a) => a.status !== "revoked");
+  const bound = usable.find((a) => a.id === project.agent_id) ?? null;
+  const limit = planLimitOf(update.error);
+  const err =
+    limit === null && update.error instanceof ApiError
+      ? update.error.status === 403
+        ? "Only admins can bind an agent."
+        : update.error.status === 404
+          ? "That agent no longer exists or was revoked."
+          : "Couldn't update the binding."
+      : null;
+
+  if (agents.isPending || org.isPending) return null;
+  // Nothing to show a non-admin on a project with no agents in the org.
+  if (!isAdmin && usable.length === 0 && !project.agent_id) return null;
+
+  return (
+    <Card title="On-prem agent" action={<Server className="size-4 text-ink-3" aria-hidden />}>
+      <div className="flex flex-col gap-3 text-sm">
+        {bound ? (
+          <p className="text-ink-3">
+            Scans run on <span className="font-medium text-ink">{bound.name}</span>{" "}
+            <AgentStatusBadge status={bound.status} /> inside your network. Domain verification is
+            not needed: the enrolment is the authorisation.
+          </p>
+        ) : project.agent_id ? (
+          <Alert tone="error">
+            Bound to an agent that is no longer listed. Rebind or unbind before scanning.
+          </Alert>
+        ) : (
+          <p className="text-ink-3">
+            Private target (intranet, staging, a service on a private address)? Bind an agent that
+            runs inside that network and scans go through it instead of the cloud.
+          </p>
+        )}
+        {isAdmin && (
+          <Field label="Agent">
+            {(id) => (
+              <Select
+                id={id}
+                value={project.agent_id ?? ""}
+                disabled={update.isPending}
+                onChange={(e) => update.mutate({ agent_id: e.target.value || null })}
+              >
+                <option value="">None — scan from the cloud</option>
+                {usable.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} ({agentStatusLabel(a.status)})
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        )}
+        {isAdmin && usable.length === 0 && (
+          <p className="text-xs text-ink-3">
+            No agents yet —{" "}
+            <Link to="/settings" className="text-brand underline">
+              create one in Settings
+            </Link>
+            .
+          </p>
+        )}
+        {limit && <PlanLimitAlert limit={limit} />}
+        {err && <Alert tone="error">{err}</Alert>}
+      </div>
+    </Card>
+  );
+}
+
+function agentStatusLabel(status: string): string {
+  return status === "active" ? "online" : status === "pending" ? "not enrolled yet" : status;
 }
 
 // ---------------------------------------------------------------- history

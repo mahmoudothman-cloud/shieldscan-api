@@ -2,13 +2,18 @@
  * /tools — which engines have a live worker right now, and the workers
  * themselves. Read from the worker registry in Redis; refreshes every
  * 30 s. An engine with no worker is why a scan would sit in "queued".
+ * M14: the org's on-prem agents are listed beside the fleet — their
+ * jobs never touch the cloud workers, so an engine "down" here does not
+ * affect an agent-bound project, and vice versa.
  */
 
+import { Link } from "react-router";
 import { useOrgId } from "@/lib/auth";
 import { useToolHealth } from "@/lib/queries";
 import { relTime } from "@/lib/format";
 import { cx } from "@/lib/cx";
 import { Alert, Card, Spinner } from "@/components/ui";
+import { AgentStatusBadge } from "@/pages/settings/Agents";
 
 const ENGINE_BLURB: Record<string, string> = {
   nuclei: "Template-driven DAST (CVEs, misconfigurations, exposures)",
@@ -36,6 +41,8 @@ export default function ToolHealth() {
   if (health.isError) return <Alert tone="error">Couldn't read tool health.</Alert>;
   const h = health.data;
   const down = h.tools.filter((t) => !t.available);
+  const agents = h.agents ?? [];
+  const agentsOnline = agents.filter((a) => a.status === "active").length;
 
   return (
     <div className="flex flex-col gap-6">
@@ -43,8 +50,15 @@ export default function ToolHealth() {
         <h1 className="text-2xl font-semibold text-ink">Tool health</h1>
         <p className="mt-1 text-sm text-ink-3">
           {h.workers.length} {h.workers.length === 1 ? "worker" : "workers"} online ·{" "}
-          {h.tools.length - down.length} of {h.tools.length} engines available · checked{" "}
-          {relTime(h.checked_at)}
+          {h.tools.length - down.length} of {h.tools.length} engines available
+          {agents.length > 0 && (
+            <>
+              {" · "}
+              {agentsOnline} of {agents.length} on-prem {agents.length === 1 ? "agent" : "agents"}{" "}
+              online
+            </>
+          )}{" "}
+          · checked {relTime(h.checked_at)}
         </p>
       </header>
 
@@ -57,6 +71,7 @@ export default function ToolHealth() {
       {h.workers.length === 0 && (
         <Alert tone="error">
           No workers are registered. Nothing will scan until the worker service is running.
+          {agentsOnline > 0 && " Agent-bound projects are unaffected."}
         </Alert>
       )}
 
@@ -112,6 +127,51 @@ export default function ToolHealth() {
             </ul>
           )}
         </Card>
+        {agents.length > 0 && (
+          <Card title="On-prem agents" className="lg:col-span-3">
+            <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {agents.map((a) => (
+                <li key={a.id} className="rounded-control border border-line p-3 text-sm">
+                  <p className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-ink">{a.name}</span>
+                    <AgentStatusBadge status={a.status} />
+                    {a.version && <span className="font-mono text-xs text-ink-3">{a.version}</span>}
+                  </p>
+                  <p className="mt-1 text-xs text-ink-3">
+                    {a.hostname ?? "—"} ·{" "}
+                    {a.last_seen_at ? `seen ${relTime(a.last_seen_at)}` : "never seen"} ·{" "}
+                    {a.in_flight_jobs} {a.in_flight_jobs === 1 ? "job" : "jobs"} in flight
+                  </p>
+                  <p className="mt-1.5 flex flex-wrap gap-1">
+                    {a.engines.map((e) => (
+                      <span
+                        key={e}
+                        className="rounded bg-ok-wash px-1.5 py-0.5 font-mono text-[11px] text-ok"
+                      >
+                        {e}
+                      </span>
+                    ))}
+                    {a.missing.map((e) => (
+                      <span
+                        key={e}
+                        className="rounded bg-critical-wash px-1.5 py-0.5 font-mono text-[11px] text-critical line-through"
+                      >
+                        {e}
+                      </span>
+                    ))}
+                  </p>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-ink-3">
+              Agents are managed in{" "}
+              <Link to="/settings" className="text-brand underline">
+                Settings
+              </Link>
+              . Struck-through engines are missing on that machine.
+            </p>
+          </Card>
+        )}
       </div>
     </div>
   );

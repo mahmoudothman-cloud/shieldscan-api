@@ -192,6 +192,8 @@ class ScanJobDetail(BaseModel):
     finding_count: int
     duration_ms: int | None
     error_message: str | None
+    # M14: set when the job ran (or is queued) on an on-prem agent.
+    agent_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 

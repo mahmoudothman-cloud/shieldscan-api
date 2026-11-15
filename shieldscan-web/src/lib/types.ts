@@ -102,6 +102,8 @@ export interface ProjectResponse {
   container_image: string | null;
   domain_verified: boolean;
   verification_token: string;
+  /** M14: bound on-prem agent; a bound project skips domain verification. */
+  agent_id: string | null;
   archived_at: string | null;
   created_at: string;
 }
@@ -119,6 +121,8 @@ export interface ScanJobDetail {
   finding_count: number;
   duration_ms: number | null;
   error_message: string | null;
+  /** M14: set when the job runs on an on-prem agent. */
+  agent_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -166,6 +170,11 @@ export interface ProjectCreateInput {
   target_url: string;
   source_repo_url?: string | null;
   container_image?: string | null;
+}
+
+export interface ProjectUpdateInput {
+  /** Bind to an on-prem agent (admin), or null to unbind. */
+  agent_id?: string | null;
 }
 
 export interface VerifyDomainSuccess {
@@ -401,7 +410,65 @@ export interface ToolHealthResponse {
     engines: string[];
   }>;
   tools: Array<{ engine: string; available: boolean; live_worker_count: number }>;
+  /** M14: this org's on-prem agents beside the global fleet. */
+  agents?: AgentHealth[];
   checked_at: string;
+}
+
+// ---------------------------------------------------------------- on-prem agents (M14)
+
+export type AgentStatus = "pending" | "active" | "offline" | "revoked";
+
+export interface AgentToolHealth {
+  status: "ok" | "missing" | "error" | string;
+  version?: string;
+  path?: string;
+  error?: string;
+}
+
+export interface AgentItem {
+  id: string;
+  name: string;
+  description: string | null;
+  status: AgentStatus | string;
+  key_prefix: string | null;
+  enrolled_at: string | null;
+  last_seen_at: string | null;
+  version: string | null;
+  hostname: string | null;
+  platform: string | null;
+  tools: Record<string, AgentToolHealth>;
+  project_count: number;
+  created_at: string;
+}
+
+export interface AgentListResponse {
+  agents: AgentItem[];
+}
+
+export interface AgentCreateInput {
+  name: string;
+  description?: string | null;
+}
+
+/** The enrolment token is in this response and nowhere else, once. */
+export interface AgentCreatedResponse {
+  agent: AgentItem;
+  enrolment_token: string;
+  enrolment_expires_at: string;
+  enrol_command: string;
+}
+
+export interface AgentHealth {
+  id: string;
+  name: string;
+  status: AgentStatus | string;
+  version: string | null;
+  hostname: string | null;
+  last_seen_at: string | null;
+  engines: string[];
+  missing: string[];
+  in_flight_jobs: number;
 }
 
 // ---------------------------------------------------------------- plans & billing (M12)

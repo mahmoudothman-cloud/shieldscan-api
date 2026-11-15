@@ -211,7 +211,8 @@ async def test_bind_project_routes_scan_through_the_agent(client, ctx, db_sessio
     assert await fake_redis.llen(agent_queue_key(agent.id)) == 0
 
     # Heartbeat brings it back; a mobile scan is refused on an agent; a quick scan is queued to the agent, not the cloud.
-    assert (await client.post("/v1/agent/heartbeat", json={}, headers=akey)).status_code == 200
+    hb = {"tools": {"nuclei": {"status": "ok", "version": "3.4"}, "zap": {"status": "missing"}}}
+    assert (await client.post("/v1/agent/heartbeat", json=hb, headers=akey)).status_code == 200
     r = await client.post(
         f"/v1/orgs/{org.id}/projects/{project.id}/scans",
         json={"scan_type": "container"},
@@ -242,6 +243,17 @@ async def test_bind_project_routes_scan_through_the_agent(client, ctx, db_sessio
     )
     r = await client.get("/v1/agent/jobs", params={"wait": 0}, headers=akey)
     assert r.status_code == 204
+
+    # The dashboard sees where the job runs: scan detail rows carry agent_id,
+    # and tool health lists the org's agents with their engines and in-flight count.
+    r = await client.get(f"/v1/orgs/{org.id}/scans/{scan_id}", headers=c["admin"])
+    assert r.status_code == 200, r.text
+    assert {j["agent_id"] for j in r.json()["jobs"]} == {str(agent.id)}
+    r = await client.get(f"/v1/orgs/{org.id}/tools/health", headers=c["member"])
+    assert r.status_code == 200
+    (ah,) = r.json()["agents"]
+    assert ah["name"] == "dc1" and ah["status"] == "active" and ah["in_flight_jobs"] >= 1
+    assert "nuclei" in ah["engines"] and "zap" in ah["missing"]
 
     # Progress events land in the scan's stream in the worker's shape.
     r = await client.post(

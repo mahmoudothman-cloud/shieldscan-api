@@ -17,7 +17,13 @@ const METERS = [
   "scans.mobile.per_period",
   "scans.full_spectrum.per_period",
 ] as const;
-const CAPS = ["projects.max", "users.max", "api_keys.max", "recon.subdomains.max"] as const;
+const CAPS = [
+  "projects.max",
+  "users.max",
+  "api_keys.max",
+  "agents.max",
+  "recon.subdomains.max",
+] as const;
 const FEATURES = [
   "ai_fix",
   "cross_layer",
@@ -76,7 +82,7 @@ function Summary({ data }: { data: BillingSummaryResponse }) {
         ))}
       </ul>
 
-      <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-5">
         {CAPS.map((key) => (
           <div key={key}>
             <dt className="text-ink-3">{LIMIT_LABELS[key] ?? key}</dt>

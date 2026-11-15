@@ -36,7 +36,7 @@ export default function NewProject() {
   const errorText =
     limit === null && create.error instanceof ApiError
       ? create.error.status === 422
-        ? "That target URL doesn't look right. Use the site's public https:// address."
+        ? "That target URL doesn't look right. Use https:// — http:// is accepted only for private or intranet hosts scanned by an on-prem agent."
         : String(create.error.detail ?? "Couldn't create the project.")
       : null;
 

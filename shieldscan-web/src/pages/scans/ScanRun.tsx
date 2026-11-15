@@ -158,12 +158,19 @@ function EngineCard({ job }: { job: ScanJobDetail }) {
       <p className="mt-1 truncate text-xs text-ink-3" title={job.target_url}>
         {job.target_url}
       </p>
+      {job.agent_id && (
+        <p className="mt-1 text-[11px] font-medium uppercase tracking-wide text-brand">
+          on-prem agent
+        </p>
+      )}
       <p className="mt-2 text-xs text-ink-3">
         {job.status === "completed" || job.status === "failed"
           ? `${job.finding_count} findings · ${duration(job.duration_ms)}`
           : job.status === "running"
             ? "working…"
-            : "waiting for a worker"}
+            : job.agent_id
+              ? "waiting for the agent to poll"
+              : "waiting for a worker"}
       </p>
       {job.error_message && <p className="mt-1 text-xs text-critical">{job.error_message}</p>}
     </li>
