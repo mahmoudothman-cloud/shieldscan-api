@@ -232,6 +232,28 @@ async def test_bind_project_routes_scan_through_the_agent(client, ctx, db_sessio
         headers=c["admin"],
     )
     assert r.status_code == 422
+    # No httpx on the agent → recon could not find a live host → refused up front, naming it.
+    r = await client.post(
+        f"/v1/orgs/{org.id}/projects/{project.id}/scans",
+        json={"scan_type": "quick"},
+        headers=c["admin"],
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["error"] == "agent_missing_tools"
+    assert r.json()["detail"]["missing"] == ["httpx"]
+    # With httpx but none of the scan type's engines → also refused, listing the engines.
+    hb["tools"]["httpx"] = {"status": "ok"}
+    hb["tools"]["nuclei"] = {"status": "missing"}
+    assert (await client.post("/v1/agent/heartbeat", json=hb, headers=akey)).status_code == 200
+    r = await client.post(
+        f"/v1/orgs/{org.id}/projects/{project.id}/scans",
+        json={"scan_type": "quick"},
+        headers=c["admin"],
+    )
+    assert r.status_code == 409
+    assert "nuclei" in r.json()["detail"]["missing"]
+    hb["tools"]["nuclei"] = {"status": "ok", "version": "3.4"}
+    assert (await client.post("/v1/agent/heartbeat", json=hb, headers=akey)).status_code == 200
     r = await client.post(
         f"/v1/orgs/{org.id}/projects/{project.id}/scans",
         json={"scan_type": "quick"},

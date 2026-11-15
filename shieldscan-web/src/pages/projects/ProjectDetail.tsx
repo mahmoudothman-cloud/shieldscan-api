@@ -266,11 +266,13 @@ function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectRespo
         ? "Verify the domain before running this scan type."
         : isDetailError(create.error.detail, "agent_offline")
           ? "The agent bound to this project is offline — start it (or check `shieldscan-agent doctor` on that machine) and try again."
-          : isDetailError(create.error.detail, "scan_type_not_supported_on_agent")
-            ? "This scan type cannot run on an on-prem agent."
-            : create.error.status === 429
-              ? "Too many scans started at once. Try again in a minute."
-              : String(create.error.detail ?? "Couldn't start the scan.")
+          : isDetailError(create.error.detail, "agent_missing_tools")
+            ? `The agent is missing tools this scan needs: ${missingToolsOf(create.error.detail).join(", ")}. Install them on that machine (shieldscan-agent doctor) and try again.`
+            : isDetailError(create.error.detail, "scan_type_not_supported_on_agent")
+              ? "This scan type cannot run on an on-prem agent."
+              : create.error.status === 429
+                ? "Too many scans started at once. Try again in a minute."
+                : String(create.error.detail ?? "Couldn't start the scan.")
       : null;
 
   return (
@@ -306,6 +308,11 @@ function RunScanPanel({ orgId, project }: { orgId: string; project: ProjectRespo
       </div>
     </Card>
   );
+}
+
+function missingToolsOf(detail: unknown): string[] {
+  const m = (detail as { missing?: unknown } | null)?.missing;
+  return Array.isArray(m) ? m.map(String) : [];
 }
 
 function isDetailError(detail: unknown, code: string): boolean {

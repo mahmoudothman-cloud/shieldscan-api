@@ -90,7 +90,7 @@ from app.schemas.scan_compare import (
     ScanComparisonResponse,
 )
 from app.services.audit import ScanAction, audit
-from app.services.orchestrator import ScanOrchestrator
+from app.services.orchestrator import SCAN_TYPE_TOOLS, ScanOrchestrator
 from app.models.agents import Agent, AgentStatus
 from app.services.agents import is_offline as is_agent_offline
 from app.services.plan_enforcement import (
@@ -178,6 +178,26 @@ _TERMINAL_FINAL: frozenset[ScanStatus] = frozenset(
 # M14: the agent runs the native tool subset (nuclei, httpx, subfinder,
 # sslyze, nikto, wapiti, nmap); scan types needing MobSF, trivy, semgrep,
 # zap etc. stay cloud-only.
+# Recon helpers the agent must have for any web scan type (subfinder is
+# optional: recon still probes the target host without it).
+_AGENT_RECON_REQUIRED: tuple[str, ...] = ("httpx",)
+
+
+def _agent_missing_tools(agent: Agent, scan_type: ScanType) -> list[str]:
+    """Tools this scan type needs that the agent's last heartbeat did not
+    report ``ok``. Empty when the agent has not reported an inventory yet
+    (nothing to judge against) or everything needed is there."""
+    inventory = agent.tools or {}
+    if not inventory:
+        return []
+    ok = {k for k, v in inventory.items() if (v or {}).get("status") == "ok"}
+    missing = [t for t in _AGENT_RECON_REQUIRED if t not in ok]
+    engines = [t for t in SCAN_TYPE_TOOLS.get(scan_type, ()) if t != "recon"]
+    if engines and not any(t in ok for t in engines):
+        missing.extend(t for t in engines if t not in ok)
+    return missing
+
+
 _AGENT_UNSUPPORTED_SCAN_TYPES: frozenset[ScanType] = frozenset(
     {ScanType.MOBILE, ScanType.CONTAINER, ScanType.FULL_WEB_SOURCE, ScanType.FULL_SPECTRUM}
 )
@@ -258,6 +278,22 @@ async def create_scan(
             )
         if body.scan_type in _AGENT_UNSUPPORTED_SCAN_TYPES:
             raise HTTPException(status_code=422, detail="scan_type_not_supported_on_agent")
+        # Step 4a' (M14): refuse what the agent cannot run, up front. Recon
+        # needs httpx (no live host → zero phase-2 jobs → a scan that
+        # "completes" with nothing); and at least one of the scan type's
+        # engines must be installed. Only judged once the agent has
+        # reported an inventory.
+        missing = _agent_missing_tools(agent, body.scan_type)
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "agent_missing_tools",
+                    "agent_id": str(agent.id),
+                    "agent_name": agent.name,
+                    "missing": missing,
+                },
+            )
 
     # Step 4b: source-acquisition prerequisite gate per Source-Ingestion
     # Fix (TOOL-ARCH §3.2 addendum 9d6ab25). ScanTypes that dispatch
