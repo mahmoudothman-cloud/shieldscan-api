@@ -18,7 +18,8 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useAuth, useOrgId } from "@/lib/auth";
-import { useOrgSummary } from "@/lib/queries";
+import { useBillingSummary, useOrgSummary } from "@/lib/queries";
+import { planName } from "@/lib/plan";
 import { cx } from "@/lib/cx";
 
 interface NavItem {
@@ -41,6 +42,7 @@ export function AppShell() {
   const { me, signOut } = useAuth();
   const orgId = useOrgId();
   const summary = useOrgSummary(orgId);
+  const billing = useBillingSummary(orgId);
   const openTotal = summary.data?.open_vulnerabilities.total;
 
   return (
@@ -103,8 +105,16 @@ export function AppShell() {
           </a>
         </nav>
         <div className="border-t border-ink-2 px-5 py-4 text-xs">
-          <p className="text-sidebar-text">Free plan</p>
-          <p className="mt-0.5 text-muted">Billing arrives with M12</p>
+          <p className="text-sidebar-text">
+            {billing.data ? `${planName(billing.data.plan_code)} plan` : "\u00a0"}
+          </p>
+          <p className="mt-0.5 text-muted">
+            {billing.data?.subscription_status === "active" && billing.data.period_end
+              ? `renews ${new Date(billing.data.period_end).toLocaleDateString()}`
+              : billing.data
+                ? billing.data.subscription_status.replace(/_/g, " ")
+                : "\u00a0"}
+          </p>
           <button
             type="button"
             onClick={() => void signOut()}
