@@ -252,6 +252,17 @@ _WEB_SCAN_TYPES: Final[frozenset[ScanType]] = frozenset({
 # ================================================================ orchestrator
 
 
+def _skip_reason(tool: str, agent_tools_ok: set[str] | None, plain_http: bool) -> str | None:
+    """Why ``tool`` gets no job (M14), or None when it should run."""
+    if tool == "recon":
+        return None
+    if agent_tools_ok is not None and tool not in agent_tools_ok:
+        return "not_installed_on_agent"
+    if plain_http and tool in TLS_ONLY_ENGINES:
+        return "plain_http_target"
+    return None
+
+
 class ScanOrchestrator:
     """Persist ScanJob rows + dispatch them to the priority queue.
 
@@ -312,6 +323,7 @@ class ScanOrchestrator:
         # new scan's scope is narrower than the scan that found it.
         scan.config = _build_config_block(scan)
 
+        skipped: dict[str, str] = {}
         if scan.scan_type in _WEB_SCAN_TYPES and not scan.is_public:
             # M8.1β.2 ADR-028 Phase-1: dispatch a SINGLE recon ScanJob
             # (engine="recon"; orchestrator-implicit per Y-RECON-ENGINE-
@@ -346,6 +358,11 @@ class ScanOrchestrator:
             # never fan out into hundreds of jobs). See DRIFT-LOG
             # 2026-11-07 (public quick scans).
             tools = SCAN_TYPE_TOOLS[scan.scan_type]
+            # M14: same trimming as phase 2 — no job for an engine the
+            # agent does not have, nor a TLS-only engine on an http target.
+            skipped = await self._skipped_tools(
+                scan.project.agent_id, tools, plain_http=target_url.lower().startswith("http://")
+            )
             jobs = [
                 ScanJob(
                     organization_id=scan.organization_id,
@@ -357,6 +374,7 @@ class ScanOrchestrator:
                     idempotency_key=f"{scan.id}:{tool}:{unix_ts}",
                 )
                 for tool in tools
+                if tool not in skipped
             ]
         for job in jobs:
             self.db.add(job)
@@ -370,6 +388,8 @@ class ScanOrchestrator:
             "priority": priority.value,
             "job_count": len(jobs),
         }
+        if skipped:
+            details["skipped_tools"] = skipped
         if identity.api_key is not None:
             details["api_key_prefix"] = identity.api_key.key_prefix
 
@@ -691,14 +711,7 @@ class ScanOrchestrator:
         #    probe. Recon-discovered surfaces can be http:// on the cloud
         #    path too, so this rule is not agent-specific.
         skipped: dict[str, str] = {}
-        agent_tools_ok: set[str] | None = None
-        if recon_agent_id is not None:
-            agent = await self.db.get(Agent, recon_agent_id)
-            inventory = (agent.tools or {}) if agent is not None else {}
-            if inventory:
-                agent_tools_ok = {
-                    k for k, v in inventory.items() if (v or {}).get("status") == "ok"
-                }
+        agent_tools_ok = await self._agent_tools_ok(recon_agent_id)
         created_jobs: list[ScanJob] = []
         for surface in surface_rows:
             target_hash = hashlib.sha256(
@@ -706,11 +719,9 @@ class ScanOrchestrator:
             ).hexdigest()[:16]
             plain_http = surface.full_url.lower().startswith("http://")
             for tool in non_recon_tools:
-                if agent_tools_ok is not None and tool not in agent_tools_ok:
-                    skipped[tool] = "not_installed_on_agent"
-                    continue
-                if plain_http and tool in TLS_ONLY_ENGINES:
-                    skipped.setdefault(tool, "plain_http_target")
+                reason = _skip_reason(tool, agent_tools_ok, plain_http)
+                if reason is not None:
+                    skipped.setdefault(tool, reason)
                     continue
                 created_jobs.append(
                     ScanJob(
@@ -757,6 +768,28 @@ class ScanOrchestrator:
                 await self.queue.dispatch(priority.value, payload)
 
         return created_jobs
+
+    async def _agent_tools_ok(self, agent_id: UUID | None) -> set[str] | None:
+        """Engines the agent's last heartbeat reported ok; None when the
+        scan is not on an agent or the agent has not reported yet."""
+        if agent_id is None:
+            return None
+        agent = await self.db.get(Agent, agent_id)
+        inventory = (agent.tools or {}) if agent is not None else {}
+        if not inventory:
+            return None
+        return {k for k, v in inventory.items() if (v or {}).get("status") == "ok"}
+
+    async def _skipped_tools(
+        self, agent_id: UUID | None, tools: tuple[str, ...], *, plain_http: bool
+    ) -> dict[str, str]:
+        ok = await self._agent_tools_ok(agent_id)
+        out: dict[str, str] = {}
+        for tool in tools:
+            reason = _skip_reason(tool, ok, plain_http)
+            if reason is not None:
+                out[tool] = reason
+        return out
 
     async def _emit_phase2_audit(
         self,

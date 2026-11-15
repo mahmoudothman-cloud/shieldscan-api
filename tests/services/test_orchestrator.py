@@ -1125,3 +1125,59 @@ async def test_dispatch_phase2_on_agent_skips_engines_the_agent_lacks(
     skipped = audit_row.details["skipped_tools"]
     assert skipped["zap"] == "not_installed_on_agent"
     assert set(skipped) == set(SCAN_TYPE_TOOLS[ScanType.FULL_WEB]) - {"recon", "nuclei", "nikto"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_direct_on_agent_skips_engines_the_agent_lacks(db_session, fake_redis):
+    """Non-web scan types (API) dispatch straight to their engines; on an
+    agent the same trimming applies and the SCAN_DISPATCHED audit says so."""
+    from app.models.agents import Agent, AgentStatus
+    from app.services.agents import agent_queue_key
+
+    org = Organization(name="Direct Org", slug=f"direct-{uuid4().hex[:8]}")
+    db_session.add(org)
+    await db_session.flush()
+    await use_org(db_session, org.id)
+    user = User(
+        email=f"dd-{uuid4().hex[:6]}@t.co", hashed_password=hash_password("DispPass-1"),
+        full_name="D", email_verified=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(Membership(user_id=user.id, organization_id=org.id, role=MembershipRole.ADMIN))
+    agent = Agent(
+        organization_id=org.id, name="dc1", status=AgentStatus.ACTIVE, key_hash="y" * 64,
+        key_prefix="ss_agent_y", last_seen_at=datetime.now(timezone.utc),
+        tools={"nuclei": {"status": "ok"}, "zap": {"status": "missing"}},
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    project = Project(
+        organization_id=org.id, name="API", target_url="https://api.corp", root_domain="api.corp",
+        domain_verified=False, agent_id=agent.id,
+    )
+    db_session.add(project)
+    await db_session.flush()
+    scan = Scan(
+        organization_id=org.id, project_id=project.id, scan_type=ScanType.API,
+        status=ScanStatus.QUEUED, priority="normal", config={},
+    )
+    db_session.add(scan)
+    await db_session.commit()
+    await db_session.refresh(scan)
+    scan.project = project  # type: ignore[attr-defined]  # as the fixtures do (no lazy-load in async)
+
+    identity = AuthIdentity(kind="jwt", organization_id=org.id, user=user, role=MembershipRole.ADMIN)
+    jobs = await ScanOrchestrator(db_session, fake_redis).dispatch(scan, identity)
+    assert {j.engine for j in jobs} == {"nuclei"}
+    assert await fake_redis.llen(agent_queue_key(agent.id)) == 1
+
+    audit_row = (
+        await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.action == ScanAction.SCAN_DISPATCHED.value, AuditLog.resource_id == scan.id
+            )
+        )
+    ).scalar_one()
+    assert set(audit_row.details["skipped_tools"]) == set(SCAN_TYPE_TOOLS[ScanType.API]) - {"nuclei"}
+    assert audit_row.details["skipped_tools"]["zap"] == "not_installed_on_agent"
