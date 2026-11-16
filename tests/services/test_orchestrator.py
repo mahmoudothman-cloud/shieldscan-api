@@ -35,6 +35,7 @@ from app.services.audit import ScanAction
 from app.services.auth import hash_password
 from app.services.credentials import encrypt_credential
 from app.services.orchestrator import (
+    _DEPTH_FOR_SCAN_TYPE,
     SCAN_TYPE_TOOLS,
     ScanOrchestrator,
     UnsupportedScanTypeError,
@@ -1181,3 +1182,19 @@ async def test_dispatch_direct_on_agent_skips_engines_the_agent_lacks(db_session
     ).scalar_one()
     assert set(audit_row.details["skipped_tools"]) == set(SCAN_TYPE_TOOLS[ScanType.API]) - {"nuclei"}
     assert audit_row.details["skipped_tools"]["zap"] == "not_installed_on_agent"
+
+
+@pytest.mark.asyncio
+async def test_full_web_dispatches_with_standard_depth(web_scan, db_session, fake_redis):
+    """Every non-quick web/API scan type carries depth=standard so the ZAP
+    runner runs its active scan (no depth = quick mode = passive only)."""
+    s = web_scan
+    s["scan"].config = {}
+    await db_session.commit()
+    await ScanOrchestrator(db_session, fake_redis).dispatch(s["scan"], s["identity"])
+    _, raw = await fake_redis.brpop("shieldscan:queue:normal", timeout=1)
+    payload = json.loads(raw)
+    assert payload["config"]["depth"] == "standard"
+    for st in (ScanType.FULL_WEB, ScanType.FULL_WEB_SOURCE, ScanType.FULL_SPECTRUM, ScanType.API):
+        assert _DEPTH_FOR_SCAN_TYPE[st] == "standard"
+    assert _DEPTH_FOR_SCAN_TYPE[ScanType.QUICK] == "deep"

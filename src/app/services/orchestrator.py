@@ -226,6 +226,16 @@ _SOURCE_REQUIRING_SCAN_TYPES: frozenset[ScanType] = frozenset({
 # scan.config wins over the default — operators can still tune.
 _DEPTH_FOR_SCAN_TYPE: Final[dict[ScanType, str]] = {
     ScanType.QUICK: "deep",  # no severity filter; the tag set below bounds the run
+    # Benchmark 2026-11-16 (DRIFT-LOG): with no depth the engine's ZAP
+    # runner falls back to quick mode — spider + passive only, no active
+    # scan — so "full web" never ran ZAP's injection checks. A standalone
+    # ZAP full scan found SQLi on Juice Shop; ours found headers. "standard"
+    # = active scan (30 min/host cap), spider depth 5; "deep" would be 90
+    # min/host, too long once recon expands to several hosts.
+    ScanType.FULL_WEB: "standard",
+    ScanType.FULL_WEB_SOURCE: "standard",
+    ScanType.FULL_SPECTRUM: "standard",
+    ScanType.API: "standard",
 }
 
 # Nuclei template tags for a quick scan (engine maps them to -tags). Shared
